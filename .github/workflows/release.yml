@@ -1,0 +1,45 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build libdbus-1-dev \
+            libpipewire-0.3-dev libwayland-dev libwayland-bin \
+            libx11-dev libxext-dev libxfixes-dev
+
+      - name: Build
+        run: |
+          meson setup build --buildtype=release
+          ninja -C build
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dest="wayland-share-bridge-${version}-linux-x86_64"
+          mkdir -p "$dest/bin" "$dest/share/applications" "$dest/share/man/man1"
+          cp build/wayland-share-bridge "$dest/bin/"
+          cp data/wayland-share-bridge-launch "$dest/bin/"
+          cp data/wayland-share-bridge.desktop "$dest/share/applications/"
+          cp man/wayland-share-bridge.1 "$dest/share/man/man1/"
+          cp README.md README.zh-CN.md LICENSE NOTICE "$dest/"
+          tar -czf "$dest.tar.gz" "$dest"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: wayland-share-bridge ${{ github.ref_name }}
+          generate_release_notes: true
+          files: wayland-share-bridge-*.tar.gz

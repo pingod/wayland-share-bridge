@@ -1,0 +1,31 @@
+wayland-share-bridge
+Copyright (C) 2026 the wayland-share-bridge contributors
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the European Union Public Licence v1.2 (EUPL-1.2).
+The full licence text is in the file LICENSE.
+
+This project is a rewrite and extension of video_bridge:
+
+    video_bridge
+    Copyright (C) lmarz
+    https://github.com/lmarz/video_bridge
+    Licensed under the EUPL-1.2
+
+The original project provided a minimal xdg-desktop-portal ScreenCast client
+that paints PipeWire frames into an X11 window.  wayland-share-bridge keeps
+that idea and extends it with cursor modes, persistent restore tokens,
+additional pixel formats, window rules for the Hyprland compositor, a
+launcher, and documentation.
+
+Changes from the original (summary):
+
+  - new command line interface (--cursor, --remember, --show, --title,
+    --token-file, --help, --version);
+  - restore token handling (persist_mode / restore_token) and a state file;
+  - support for BGRx, BGRA, RGBx and RGBA frames, with channel swapping;
+  - proper stride and partial-frame handling;
+  - XFixes click-through input region, WM_CLASS, window type and opacity
+    hints so that the mirror window can stay invisible;
+  - launcher that installs Hyprland window rules (Lua and legacy parsers);
+  - documentation (English and Chinese), troubleshooting and scenarios.

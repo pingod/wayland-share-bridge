@@ -1,0 +1,192 @@
+.\" SPDX-License-Identifier: EUPL-1.2
+.TH WAYLAND-SHARE-BRIDGE 1 "2026-10-20" "wayland-share-bridge 1.0.0" "User Commands"
+.SH NAME
+wayland-share-bridge \- share Wayland screens and windows with X11 applications
+.SH SYNOPSIS
+.B wayland-share-bridge
+.RI [ options ]
+.br
+.B wayland-share-bridge
+.B \-\-list-sources
+.br
+.B wayland-share-bridge
+.RB [ \-\-reselect [= KIND ]]
+.br
+.B wayland-share-bridge
+.B \-\-status
+.br
+.B wayland-share-bridge
+.B \-\-quit
+.SH DESCRIPTION
+.B wayland-share-bridge
+captures a Wayland screen or window and paints every frame into an ordinary
+X11 window.  X11 and XWayland applications (WPS Office, Zoom, Feishu, Electron
+applications, browsers, OBS, ...) can capture that window like any other, even
+though they cannot see native Wayland windows at all.
+.PP
+By default the bridge talks to the compositor directly through
+.BR ext-image-copy-capture-v1 ;
+screens are enumerated with
+.BR wl_output
+and windows with
+.BR ext-foreign-toplevel-list-v1 .
+The sources are offered in the tray menu, so switching between them is a
+single click and no desktop portal picker is involved.
+With
+.BR \-\-portal
+(or when the compositor lacks those protocols) the bridge falls back to the
+.BR org.freedesktop.portal.ScreenCast
+portal and the compositor's own picker.
+.PP
+The bridge window is invisible (via
+.BR _NET_WM_WINDOW_OPACITY
+or a compositor window rule) and click-through (empty XFixes input region).
+The installed launcher
+.B wayland-share-bridge-launch
+adds the Hyprland rule that hides the window.
+.PP
+A single instance runs per session and offers a tray icon (StatusNotifierItem
+with a D-BusMenu) plus a small control interface on the session bus.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-cursor= MODE
+Cursor mode for the portal backend: \fBhidden\fR, \fBembedded\fR (default) or
+\fBmetadata\fR.  Direct capture paints the cursor for monitor sources.
+.TP
+.BR \-k ", " \-\-source\-kind= KIND
+Fallback source kind for the portal backend: \fBauto\fR (default, remembers the
+last choice), \fBany\fR, \fBscreen\fR or \fBwindow\fR.
+.TP
+.BR \-S ", " \-\-source= SPEC
+Capture SPEC immediately:
+.BI screen: NAME
+or
+.BI window: APP_ID
+or
+.IB window: APP_ID | TITLE \fR.
+Names are the ones printed by \fB\-\-list\-sources\fR.
+.TP
+.BR \-L ", " \-\-list\-sources
+Print the screens and windows that can be shared, one per line as
+.I kind:id<TAB>label\fR, then exit.
+.TP
+.B \-\-portal
+Always use the desktop portal (system picker) instead of direct capture.
+.TP
+.BR \-r ", " \-\-remember
+Remember the last source (default).  The state is stored in
+.IR $XDG_STATE_HOME/wayland-share-bridge/state ;
+the portal restore token (when returned) in
+.IR $XDG_STATE_HOME/wayland-share-bridge/restore_token .
+.TP
+.BR \-n ", " \-\-no\-remember
+Do not remember the source.
+.TP
+.BR \-s ", " \-\-show
+Show the bridge window.  Intended for debugging; it stays click-through.
+.TP
+.BR \-t ", " \-\-title= TEXT
+Window title.  Defaults to
+.IR "Wayland Share Bridge" .
+.TP
+.BR \-f ", " \-\-token\-file= PATH
+Use a custom restore token file for the portal backend.
+.TP
+.B \-\-no\-tray
+Do not create the tray icon and the control interface.
+.TP
+.B \-\-allow\-multiple
+Allow more than one running instance.
+.TP
+.BR \-h ", " \-\-help
+Show help.
+.TP
+.BR \-V ", " \-\-version
+Show the version.
+.SH TRAY MENU
+The tray icon offers a flat menu:
+.TP
+.B Stop sharing
+Stop mirroring; the bridge keeps running.
+.TP
+.B Show/Hide shared window
+Toggle the visibility of the mirror window on your own screen.
+.TP
+.B Screen: NAME (WxH)
+One click mirrors that monitor; the active source carries a checkmark.
+.TP
+.B Window: APP \- TITLE
+One click mirrors that native Wayland window; the active source carries a
+checkmark.
+.TP
+.B Share via system portal...
+Runs the portal picker (same as \fB\-\-reselect\fR).
+.TP
+.B Quit
+Stops the bridge.
+.PP
+The menu is flat because tray hosts hydrate nested submenus inconsistently.
+It is refreshed every time the menu is opened, and the SNI tooltip shows the
+current sharing status.
+.SH CONTROLLING A RUNNING INSTANCE
+.TP
+.BR \-\-reselect [= KIND ]
+Ask the portal for a new source, optionally restricted to
+\fBKIND\fR (\fBany\fR, \fBscreen\fR or \fBwindow\fR).
+.TP
+.B \-\-status
+Print what the running instance is sharing.
+.TP
+.B \-\-quit
+Stop the running instance.
+.SH SIGNALS
+.TP
+.B SIGHUP
+Ask the running instance to pick a new source through the portal.
+.TP
+.B SIGINT ", " SIGTERM
+Stop the bridge.
+.SH ENVIRONMENT
+.TP
+.B WAYLAND_DISPLAY
+Compositor connection used for direct capture.
+.TP
+.B DISPLAY
+X server connection (XWayland) used for the mirror window.
+.TP
+.B XDG_STATE_HOME
+Base directory for the remembered source and the portal restore token.
+.TP
+.B WAYLAND_SHARE_BRIDGE_BINARY
+Binary executed by the launcher (default:
+.BR wayland-share-bridge ).
+.SH FILES
+.TP
+.I $XDG_STATE_HOME/wayland-share-bridge/state
+Remembered source (\fIsource=screen:NAME\fR or \fIsource=window:APP_ID|TITLE\fR).
+.TP
+.I $XDG_STATE_HOME/wayland-share-bridge/restore_token
+Portal restore token, when the portal returns one.
+.SH EXAMPLES
+.TP
+.B wayland-share-bridge-launch
+Start the bridge from a desktop session and use the tray menu.
+.TP
+.B wayland-share-bridge --list-sources
+See what can be shared, then pass one of the names to \fB\-\-source\fR.
+.TP
+.B wayland-share-bridge --source=screen:DP-2
+Share the monitor called DP-2.
+.TP
+.B wayland-share-bridge --no-tray --source='window:firefox|DeepSeek'
+Share one window, run headless (no tray).
+.TP
+.B wayland-share-bridge --portal --cursor=hidden
+Use the portal picker with the cursor hidden.
+.SH SEE ALSO
+.BR xdg-desktop-portal (1),
+.BR pipewire (1),
+.BR hyprctl (1)
+.SH LICENSE
+EUPL-1.2.  The original idea and the first implementation come from
+video_bridge by lmarz; see the NOTICE file.

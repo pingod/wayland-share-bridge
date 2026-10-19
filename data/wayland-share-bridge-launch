@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: EUPL-1.2
+#
+# wayland-share-bridge-launch - start the bridge with a compositor-friendly
+# window setup.
+#
+# The bridge itself makes its window click-through (XFixes empty input
+# region) and asks compositors that support _NET_WM_WINDOW_OPACITY to draw
+# it fully transparent.  Hyprland ignores that property for XWayland
+# windows, so this launcher installs an equivalent Hyprland rule before the
+# window is mapped (opacity 0, floating, no blur).
+#
+# Set WAYLAND_SHARE_BRIDGE_BINARY to run a different binary and pass all
+# arguments through to it.
+
+set -u
+
+BINARY="${WAYLAND_SHARE_BRIDGE_BINARY:-wayland-share-bridge}"
+
+if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+    for socket in $(ls -1dt "$runtime_dir"/hypr/*/.socket.sock 2>/dev/null); do
+        [ -S "$socket" ] || continue
+        HYPRLAND_INSTANCE_SIGNATURE=$(basename "$(dirname "$socket")")
+        export HYPRLAND_INSTANCE_SIGNATURE
+        break
+    done
+fi
+
+if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1; then
+    # Hyprland 0.4x+ with the Lua config: hyprctl keyword is unavailable,
+    # hyprctl eval is the supported interface.
+    if ! hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden", match = { class = "^wayland-share-bridge$" }, opacity = 0.0, float = true, no_blur = true })' >/dev/null 2>&1; then
+        # Legacy hyprland.conf parser.
+        hyprctl keyword windowrulev2 'opacity 0.0, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
+        hyprctl keyword windowrulev2 'float, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
+        hyprctl keyword windowrulev2 'no_blur, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
+    fi
+fi
+
+exec "$BINARY" "$@"
