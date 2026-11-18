@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## 1.4.3 - 2026-11-19
+
+- **Stopping sharing or quitting left an invisible window on the desktop.**
+  Hiding the mirror only set opacity 0 and an empty input region; the window
+  stayed *mapped*, so the compositor kept listing it as a client (window
+  lists, overviews, `hyprctl clients`, Alt-Tab).  The window is now unmapped
+  whenever nothing is mirrored - at start-up, after **Stop sharing**, after a
+  closed source, a lost stream, a lost session bus, and right before the
+  process exits - and mapped again when the next stream starts.  A mapped
+  window is required for capture, so this only happens while sharing.
+- The Hyprland rule is reset to its hidden state on exit, so a bridge that was
+  quit while the window was shown no longer leaves a rule that makes the next
+  window visible for a moment.
+
 ## 1.4.2 - 2026-11-18
 
 - **Show shared window could not be dragged on Hyprland, and the window

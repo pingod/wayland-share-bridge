@@ -28,6 +28,7 @@ struct xdata {
 	Window window;
 	XImage *image;
 	int visible;
+	int mapped;
 };
 
 struct xdata *xhandler_init(const struct options *opts);
@@ -53,6 +54,13 @@ void xhandler_present(struct xdata *data, int x, int y, unsigned int width, unsi
 void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,
 		   int src_x, int src_y, unsigned int width, unsigned int height,
 		   int transform);
+
+/*
+ * Maps or unmaps the mirror window.  Unmapping removes it from the desktop
+ * entirely, which is what an idle bridge wants; a mapped but transparent
+ * window still appears in window lists.
+ */
+void xhandler_set_mapped(struct xdata *data, int mapped);
 
 /*
  * Shows or hides the mirror window.  A shown window accepts the pointer (so

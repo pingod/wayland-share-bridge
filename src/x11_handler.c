@@ -301,8 +301,18 @@ struct xdata *xhandler_init(const struct options *opts) {
 	if(!opts->show)
 		set_cardinal(data->display, data->window, "_NET_WM_WINDOW_OPACITY", 0);
 
+	/*
+	 * An idle bridge has nothing to mirror, so it keeps no window on the
+	 * desktop: the window is mapped when a stream starts or when the user
+	 * asks to see it.  Mapping it here would leave a client the compositor
+	 * lists even though it shows nothing.
+	 */
 	data->visible = opts->show ? 1 : 0;
-	XMapWindow(data->display, data->window);
+	data->mapped = 0;
+	if(opts->show) {
+		data->mapped = 1;
+		XMapWindow(data->display, data->window);
+	}
 	XFlush(data->display);
 
 	return data;
@@ -413,6 +423,28 @@ void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_
 		   int transform) {
 	if(xhandler_upload(data, pixels, size, stride, src_x, src_y, width, height, transform) == 0)
 		xhandler_present(data, 0, 0, data->width, data->height);
+}
+
+/*
+ * An unmapped window is not on the desktop at all: the compositor lists no
+ * client for it, it cannot take focus and nothing can be drawn over it.  A
+ * mapped window with opacity 0 still shows up in window lists and overviews,
+ * which is what a stopped or quit bridge must not leave behind.
+ */
+void xhandler_set_mapped(struct xdata *data, int mapped) {
+	if(!data || !data->display || !data->window)
+		return;
+
+	mapped = mapped ? 1 : 0;
+	if(data->mapped == mapped)
+		return;
+
+	if(mapped)
+		XMapWindow(data->display, data->window);
+	else
+		XUnmapWindow(data->display, data->window);
+	data->mapped = mapped;
+	XFlush(data->display);
 }
 
 void xhandler_set_visible(struct xdata *data, int visible) {

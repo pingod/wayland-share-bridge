@@ -28,8 +28,9 @@ click for a window - and the choice is remembered for the next start.  The
 desktop portal is still available via **Share via system portal...** (`--portal`) as a
 fallback for compositors without the direct capture protocols.
 
-The X11 window is invisible and click-through while it waits, so it does not
-get in your way for an application to capture it.
+The X11 window only exists while something is mirrored and is invisible and
+click-through, so it never gets in your way; an idle bridge keeps no window on
+the desktop at all.
 
 ## Why
 
@@ -115,8 +116,9 @@ This installs:
    wayland-share-bridge-launch
    ```
 
-2. An invisible window called **Wayland Share Bridge** is created, and a tray
-   icon appears.  Right-click it and pick a source from the flat menu:
+2. A tray icon appears.  Right-click it and pick a source from the flat menu
+   (the mirror window is created when the first source starts, so an idle
+   bridge leaves nothing behind on your desktop):
    - `Screen: DP-2 (2560x1440)` — mirror that monitor
    - `Window: firefox — ...` — mirror that native Wayland window
    - **Show shared window** — temporarily make the mirror window visible, so
@@ -124,8 +126,8 @@ This installs:
      accepts the pointer, so you can move it with your compositor's usual
      mouse binding (e.g. Super+left drag).  **Hide** makes it click-through
      again
-   - **Stop sharing** — stop mirroring and hide the window, without quitting
-     the bridge
+   - **Stop sharing** — stop mirroring and take the window off the desktop
+     again, without quitting the bridge
    - **Share via system portal...** — the portal picker, for compositors without
      direct capture
 3. In the application you want to share from, open its screen-share dialog and
@@ -191,8 +193,8 @@ wayland-share-bridge --search firefox   # filter the running instance's Windows 
 
 | Entry | Action |
 | --- | --- |
-| **Stop sharing** | Stop mirroring and hide the window again; the bridge keeps running. |
-| **Show/Hide shared window** | Toggle the mirror window between visible and hidden. Hidden it is invisible and click-through; shown it accepts the pointer so the compositor can drag it (Super+drag in Hyprland). It hides itself again when sharing stops. |
+| **Stop sharing** | Stop mirroring and unmap the window, so nothing is left on the desktop; the bridge keeps running. |
+| **Show/Hide shared window** | Toggle the mirror window between visible and hidden. Hidden it is invisible and click-through; shown it accepts the pointer so the compositor can drag it (Super+drag in Hyprland). It leaves the desktop again when sharing stops. |
 | **Screens ▸** | Submenu with one `Screen: NAME (WxH)` entry per monitor. |
 | **Windows ▸** | Submenu grouped by application: `firefox (3) ▸ window title`. |
 | **Share via system portal...** | Portal picker (same as `--reselect`). |

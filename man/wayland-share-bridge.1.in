@@ -38,9 +38,11 @@ With
 .BR org.freedesktop.portal.ScreenCast
 portal and the compositor's own picker.
 .PP
-The bridge window is invisible while it waits (via
+The bridge window exists while a source is shared and is invisible (via
 .BR _NET_WM_WINDOW_OPACITY
 or a compositor window rule) and click-through (empty XFixes input region).
+An idle bridge keeps no window on the desktop: it is unmapped until a stream
+starts and again once the stream ends.
 A window shown with
 .B \-\-show
 or the tray entry accepts the pointer so it can be dragged, and hides itself

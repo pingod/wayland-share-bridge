@@ -188,8 +188,11 @@ static void hyprland_set_visibility(int visible) {
 
 static void set_window_visibility(int visible) {
 	g_visible = visible ? 1 : 0;
-	if(g_xdata)
+	if(g_xdata) {
+		if(g_visible)
+			xhandler_set_mapped(g_xdata, 1);
 		xhandler_set_visible(g_xdata, g_visible);
+	}
 	hyprland_set_visibility(g_visible);
 	if(g_tray)
 		thandler_set_state(g_tray, g_sharing, g_visible, g_share_kind, g_share_label);
@@ -205,8 +208,19 @@ static void set_window_visibility(int visible) {
  * a window the user asked for with --show or the tray toggle.
  */
 static void hide_mirror_after_stream(void) {
-	if(g_sharing && g_visible)
+	if(!g_sharing)
+		return;
+
+	if(g_visible)
 		set_window_visibility(0);
+
+	/*
+	 * Hiding is not enough: a mapped window with opacity 0 is still a client
+	 * the compositor lists, shows in overviews and offers in window pickers.
+	 * Unmapping takes it off the desktop until the next stream maps it again.
+	 */
+	if(g_xdata)
+		xhandler_set_mapped(g_xdata, 0);
 }
 
 static void update_tray_state(void) {
@@ -296,10 +310,9 @@ static void usage(FILE *out) {
 		"       " PROGRAM_NAME " --search=QUERY\n"
 		"\n"
 		"Share Wayland screens or windows with X11 applications.\n"
-		"The bridge opens an invisible X11 window (\"Wayland Share Bridge\")\n"
-		"and mirrors the chosen screen or window into it.  Pick the source\n"
-		"from the tray menu; the application you are sharing from only has to\n"
-		"share the \"Wayland Share Bridge\" window.\n"
+		"Pick a source from the tray menu; the bridge then opens an invisible\n"
+		"X11 window (\"Wayland Share Bridge\") and mirrors that source into it.\n"
+		"The application you are sharing from only has to share that window.\n"
 		"\n"
 		"Options:\n"
 		"  -c, --cursor=MODE     cursor mode for the portal backend: hidden,\n"
@@ -407,6 +420,9 @@ static int start_direct(const char *spec) {
 
 	g_direct_stalled = 0;
 	g_sharing = 1;
+	/* Unmapped while idle: a stream is the only reason to be on the desktop. */
+	if(g_xdata)
+		xhandler_set_mapped(g_xdata, 1);
 	g_share_kind = req.kind;
 	utf8_copy(g_share_label, sizeof(g_share_label), req.cropped ? "" : req.id);
 	update_tray_state();
@@ -446,6 +462,8 @@ static int start_portal(struct ddata *ddata, struct pdata **pdata,
 
 	phandler_clear_connection_lost(*pdata);
 	g_sharing = 2;
+	if(g_xdata)
+		xhandler_set_mapped(g_xdata, 1);
 	g_share_kind = ddata->source.type == 1 ? SOURCE_KIND_SCREEN :
 		       ddata->source.type == 2 ? SOURCE_KIND_WINDOW : SOURCE_KIND_ANY;
 	g_share_label[0] = '\0';
@@ -1011,8 +1029,16 @@ out:
 		dhandler_destroy(ddata);
 	if(g_direct)
 		wlcap_destroy();
-	if(g_xdata)
+	if(g_xdata) {
+		xhandler_set_mapped(g_xdata, 0);
 		xhandler_destroy(g_xdata);
+	}
+	/*
+	 * Leave the compositor rule in its hidden state: a bridge that quits
+	 * while the window was shown would otherwise leave a rule that makes the
+	 * next window visible for a moment.
+	 */
+	hyprland_set_visibility(0);
 	free(owned_token_path);
 	free(owned_state_dir);
 	free(owned_state_path);
