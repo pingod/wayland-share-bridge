@@ -64,9 +64,10 @@ Look for `opacity: 0.000000` or the rule name in the output.  `xwininfo -id
   rule list grows with identical entries.  That is harmless, but if you prefer
   a single permanent rule, add it to your Hyprland configuration instead of
   using the launcher.
-- The window is always click-through, also with `--show` and the tray
-  toggle, so a visible bridge window never steals clicks; move it with the
-  compositor's own binding (Super+drag).
+- A hidden window is click-through.  A shown one (`--show` or the tray
+  toggle) has a full input region, otherwise the compositor cannot target it
+  and Super+drag would grab whatever is underneath instead.  Hide it again to
+  make it click-through.
 - If window rules are not your thing, a small alternative is to keep the
   window off-screen by using a dedicated scratchpad workspace only for the
   bridge, but then X11 clients cannot capture it reliably; the rule is the

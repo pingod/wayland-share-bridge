@@ -38,9 +38,12 @@ With
 .BR org.freedesktop.portal.ScreenCast
 portal and the compositor's own picker.
 .PP
-The bridge window is invisible (via
+The bridge window is invisible while it waits (via
 .BR _NET_WM_WINDOW_OPACITY
 or a compositor window rule) and click-through (empty XFixes input region).
+A window shown with
+.B \-\-show
+or the tray entry accepts the pointer so it can be dragged.
 The installed launcher
 .B wayland-share-bridge-launch
 adds the Hyprland rule that hides the window.
@@ -92,7 +95,8 @@ the portal restore token (when returned) in
 Do not remember the source.
 .TP
 .BR \-s ", " \-\-show
-Show the bridge window.  Intended for debugging; it stays click-through.
+Show the bridge window.  Intended for debugging; a shown window accepts the
+pointer so it can be dragged, hide it again from the tray.
 .TP
 .BR \-t ", " \-\-title= TEXT
 Window title.  Defaults to

@@ -55,8 +55,9 @@ void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_
 		   int transform);
 
 /*
- * Shows or hides the mirror window.  The window stays click-through in both
- * states; move it with the compositor's own mouse binding.
+ * Shows or hides the mirror window.  A shown window accepts the pointer (so
+ * it can be dragged with the compositor's own mouse binding); a hidden one is
+ * click-through.
  */
 void xhandler_set_visible(struct xdata *data, int visible);
 

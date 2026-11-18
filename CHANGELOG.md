@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## 1.4.1 - 2026-11-18
+
+- Fix a regression from 1.4.0: the mirror window kept an empty input region
+  when it was shown, so the compositor could no longer target it and
+  **Show shared window** could not be dragged any more.  Shown now means a
+  full input region again; hidden stays click-through.
+
 ## 1.4.0 - 2026-11-18
 
 - Crash fix: a window title or status text that was cut in the middle of a

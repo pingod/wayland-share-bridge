@@ -28,8 +28,8 @@ click for a window - and the choice is remembered for the next start.  The
 desktop portal is still available via **Share via system portal...** (`--portal`) as a
 fallback for compositors without the direct capture protocols.
 
-The X11 window is invisible and click-through, so it does not get in your way
-while it waits for an application to capture it.
+The X11 window is invisible and click-through while it waits, so it does not
+get in your way for an application to capture it.
 
 ## Why
 
@@ -120,9 +120,10 @@ This installs:
    - `Screen: DP-2 (2560x1440)` — mirror that monitor
    - `Window: firefox — ...` — mirror that native Wayland window
    - **Show shared window** — temporarily make the mirror window visible, so
-     you can see on your own screen what you are sharing; it stays
-     click-through, move it with your compositor's usual mouse binding
-     (e.g. Super+left drag)
+     you can see on your own screen what you are sharing; a shown window
+     accepts the pointer, so you can move it with your compositor's usual
+     mouse binding (e.g. Super+left drag).  **Hide** makes it click-through
+     again
    - **Stop sharing** — stop mirroring without quitting the bridge
    - **Share via system portal...** — the portal picker, for compositors without
      direct capture
@@ -190,7 +191,7 @@ wayland-share-bridge --search firefox   # filter the running instance's Windows 
 | Entry | Action |
 | --- | --- |
 | **Stop sharing** | Stop mirroring; the bridge keeps running. |
-| **Show/Hide shared window** | Toggle the mirror window between visible and hidden. It stays click-through in both states; move it with your compositor's usual mouse binding (Super+drag in Hyprland). |
+| **Show/Hide shared window** | Toggle the mirror window between visible and hidden. Hidden it is click-through; shown it accepts the pointer so it can be dragged (Super+drag in Hyprland). |
 | **Screens ▸** | Submenu with one `Screen: NAME (WxH)` entry per monitor. |
 | **Windows ▸** | Submenu grouped by application: `firefox (3) ▸ window title`. |
 | **Share via system portal...** | Portal picker (same as `--reselect`). |

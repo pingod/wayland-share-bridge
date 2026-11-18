@@ -87,12 +87,32 @@ static void set_window_state(Display *dpy, Window win) {
 		(unsigned char *) atoms, 2);
 }
 
-/* Clicks go through to whatever is below the mirror window. */
-static void make_input_transparent(Display *dpy, Window win) {
-	XserverRegion empty = XFixesCreateRegion(dpy, NULL, 0);
+/*
+ * Hidden: an empty input region, so clicks go through to whatever is below.
+ * Shown: a full input region, because a compositor cannot target a window
+ * that is not under the pointer - Hyprland's Super+drag hits whatever surface
+ * accepts input at the cursor, so a click-through window cannot be dragged.
+ */
+static void set_input_region(Display *dpy, Window win, int interactive) {
+	XWindowAttributes attr;
+	XserverRegion region;
 
-	XFixesSetWindowShapeRegion(dpy, win, ShapeInput, 0, 0, empty);
-	XFixesDestroyRegion(dpy, empty);
+	if(interactive) {
+		XRectangle rect;
+
+		if(!XGetWindowAttributes(dpy, win, &attr))
+			return;
+		rect.x = 0;
+		rect.y = 0;
+		rect.width = (unsigned short) attr.width;
+		rect.height = (unsigned short) attr.height;
+		region = XFixesCreateRegion(dpy, &rect, 1);
+	} else {
+		region = XFixesCreateRegion(dpy, NULL, 0);
+	}
+
+	XFixesSetWindowShapeRegion(dpy, win, ShapeInput, 0, 0, region);
+	XFixesDestroyRegion(dpy, region);
 }
 
 static void shm_release(struct xdata *data) {
@@ -262,7 +282,9 @@ struct xdata *xhandler_init(const struct options *opts) {
 	 * ignores the property for XWayland windows, so the launcher script
 	 * installs an equivalent window rule there; see data/.
 	 */
-	make_input_transparent(data->display, data->window);
+	/* Hidden by default: empty input region so clicks go through.  With
+	 * --show the window is visible and has to be draggable. */
+	set_input_region(data->display, data->window, opts->show);
 
 	if(!opts->show)
 		set_cardinal(data->display, data->window, "_NET_WM_WINDOW_OPACITY", 0);
@@ -304,6 +326,9 @@ void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height
 	changes.width = (int) width;
 	changes.height = (int) height;
 	XConfigureWindow(data->display, data->window, CWWidth | CWHeight, &changes);
+	/* Keep the (interactive) input region in sync with the new size. */
+	if(data->visible)
+		set_input_region(data->display, data->window, 1);
 	XFlush(data->display);
 }
 
@@ -385,8 +410,9 @@ void xhandler_set_visible(struct xdata *data, int visible) {
 	visible = visible ? 1 : 0;
 	set_cardinal(data->display, data->window, "_NET_WM_WINDOW_OPACITY",
 		     visible ? 0xffffffffUL : 0);
-	/* The window stays click-through even when it is shown. */
-	make_input_transparent(data->display, data->window);
+	/* Shown windows accept the pointer so the compositor can drag them;
+	 * hidden ones stay click-through. */
+	set_input_region(data->display, data->window, visible);
 	if(visible)
 		XRaiseWindow(data->display, data->window);
 	data->visible = visible;
