@@ -443,7 +443,8 @@ static void append_item_struct(DBusMessageIter *iter, struct tray *tray, int32_t
 		char label[64];
 
 		if(windows && tray->window_filter[0])
-			snprintf(label, sizeof(label), tr("Windows (search)", "窗口（搜索）"));
+			snprintf(label, sizeof(label), "%s",
+				 tr("Windows (search)", "窗口（搜索）"));
 		else
 			snprintf(label, sizeof(label), "%s",
 				 windows ? tr("Windows", "窗口") : tr("Screens", "屏幕"));

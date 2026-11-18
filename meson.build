@@ -9,6 +9,10 @@ cc = meson.get_compiler('c')
 if cc.has_argument('-Wno-pedantic')
     add_project_arguments('-Wno-pedantic', language : 'c')
 endif
+# Ubuntu's gcc enables this by default; keep local and CI builds in sync.
+if cc.has_argument('-Wformat-security')
+    add_project_arguments('-Wformat-security', language : 'c')
+endif
 
 # The project version above is the only place the version is defined; the
 # binary and the manual page are generated from it.
