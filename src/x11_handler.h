@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <X11/Xlib.h>
+#include <X11/extensions/XShm.h>
 
 #include "config.h"
 
@@ -15,31 +16,51 @@ struct xdata {
 	unsigned int height;
 	int swap_rb;
 
+	/* MIT-SHM is used when the server supports it (no socket copy). */
+	int use_shm;
+	int shm_attached;
+	char *shm_addr;
+	XShmSegmentInfo shminfo;
+
 	uint32_t *buffer;
 
 	Display *display;
 	Window window;
 	XImage *image;
 	int visible;
-	int pos_x;
-	int pos_y;
-	int pos_saved;
 };
 
 struct xdata *xhandler_init(const struct options *opts);
 
+/* (Re)allocates the mirror image and resizes the window. */
 void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height, int swap_rb);
 
-void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_t stride);
+/*
+ * Converts a frame region into the mirror image without talking to the X
+ * server (so a damage rectangle can be presented separately).
+ */
+int xhandler_upload(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,
+		    int src_x, int src_y, unsigned int width, unsigned int height,
+		    int transform);
+
+/* Pushes a rectangle of the current image to the window. */
+void xhandler_present(struct xdata *data, int x, int y, unsigned int width, unsigned int height);
 
 /*
- * Shows or hides the mirror window.  On compositors that honour
- * _NET_WM_WINDOW_OPACITY (KDE, GNOME, ...) the opacity property is enough;
- * the caller can additionally apply a compositor specific rule (Hyprland).
+ * Convenience wrapper: uploads the rectangle (src_x, src_y, width, height)
+ * of a frame into the top left corner of the window and presents all of it.
+ */
+void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,
+		   int src_x, int src_y, unsigned int width, unsigned int height,
+		   int transform);
+
+/*
+ * Shows or hides the mirror window.  The window stays click-through in both
+ * states; move it with the compositor's own mouse binding.
  */
 void xhandler_set_visible(struct xdata *data, int visible);
 
-uint8_t xhandler_routine(struct xdata *data);
+void xhandler_routine(struct xdata *data);
 
 void xhandler_destroy(struct xdata *data);
 

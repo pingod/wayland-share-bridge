@@ -7,11 +7,13 @@
 struct tray;
 
 /*
- * Creates the status notifier icon ("tray") plus the D-Bus control service.
- * Returns NULL when the session bus or the StatusNotifierWatcher is not
- * available; the bridge keeps running without a tray in that case.
+ * Creates the D-Bus control service and, when want_tray is non-zero, the
+ * status notifier icon ("tray").  The control interface is exported in both
+ * modes, so --status/--quit/--reselect/--source work under --no-tray.
+ * Returns NULL when the session bus is not available; the bridge keeps
+ * running without either.
  */
-struct tray *thandler_init(const char *title);
+struct tray *thandler_init(const char *title, int want_tray);
 
 int thandler_fd(struct tray *tray);
 
@@ -52,10 +54,11 @@ void thandler_set_source_provider(struct tray *tray,
 				  int (*provider)(enum source_kind, struct capture_source **));
 
 /*
- * Returns 1 when the user picked a concrete source from the menu; fills *kind
- * and *id (the id points into the tray and stays valid until the next pick).
+ * Returns 1 when the user picked a concrete source (menu click or
+ * SelectSource); *spec points into the tray and stays valid until the next
+ * pick.  The spec uses the command line syntax, e.g. "screen:DP-2".
  */
-int thandler_take_selection(struct tray *tray, enum source_kind *kind, const char **id);
+int thandler_take_selection(struct tray *tray, const char **spec);
 
 void thandler_destroy(struct tray *tray);
 
@@ -68,5 +71,8 @@ int tcontrol_request(const char *method, const char *argument, char **reply_text
 
 /* Returns 1 when another bridge instance exports the control interface. */
 int tcontrol_is_running(void);
+
+/* Asks a running instance to switch to the given source spec. */
+int tcontrol_select_source(const char *spec);
 
 #endif /* TRAY_HANDLER_H */

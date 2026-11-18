@@ -66,6 +66,7 @@ start.
 
 Runtime:
 
+- PipeWire 0.3.44 or newer (the stream targets its node by object serial).
 - A Wayland compositor with **XDG Desktop Portal ScreenCast** support
   (PipeWire + session bus), or, for direct capture, one that advertises
   `ext-image-copy-capture-v1`, `ext-image-capture-source-v1` and
@@ -91,6 +92,7 @@ particular `wayland-protocols` version is required.
 ```sh
 meson setup build
 ninja -C build
+meson test -C build      # unit tests for the pure helpers
 sudo ninja -C build install
 ```
 
@@ -101,6 +103,9 @@ This installs:
   sets up the Hyprland rules (see below)
 - `/usr/local/share/applications/wayland-share-bridge.desktop` – menu entry
 - `/usr/local/share/man/man1/wayland-share-bridge.1` – manual page (`man wayland-share-bridge`)
+- `/usr/local/share/systemd/user/wayland-share-bridge.service` – systemd
+  user unit (`systemctl --user enable --now wayland-share-bridge`)
+- `/usr/local/share/metainfo/wayland-share-bridge.metainfo.xml` – AppStream data
 
 ## Quick start
 
@@ -114,9 +119,10 @@ This installs:
    icon appears.  Right-click it and pick a source from the flat menu:
    - `Screen: DP-2 (2560x1440)` — mirror that monitor
    - `Window: firefox — ...` — mirror that native Wayland window
-   - **Show shared window** — temporarily make the mirror window visible (drag it
-     with your compositor's usual mouse binding, e.g. Super+left drag), so
-     you can see on your own screen what you are sharing
+   - **Show shared window** — temporarily make the mirror window visible, so
+     you can see on your own screen what you are sharing; it stays
+     click-through, move it with your compositor's usual mouse binding
+     (e.g. Super+left drag)
    - **Stop sharing** — stop mirroring without quitting the bridge
    - **Share via system portal...** — the portal picker, for compositors without
      direct capture
@@ -141,6 +147,7 @@ Usage: wayland-share-bridge [options]
        wayland-share-bridge --reselect[=KIND]
        wayland-share-bridge --status
        wayland-share-bridge --quit
+       wayland-share-bridge --search=QUERY
 
 Options:
   -c, --cursor=MODE     cursor mode for the portal backend: hidden,
@@ -148,16 +155,21 @@ Options:
   -k, --source-kind=KIND
                         fallback source kind for the portal backend
                         (auto, any, screen, window; default: auto)
-  -S, --source=SPEC     capture SPEC right away: screen:NAME or
-                        window:APP_ID or window:APP_ID|TITLE
+  -S, --source=SPEC     capture SPEC right away: screen:NAME,
+                        window:APP_ID, window:APP_ID|TITLE, or
+                        region:NAME,X,Y,W,H (direct capture only);
+                        with a running instance, switches it to SPEC
   -L, --list-sources    list the screens and windows that can be shared
+                        (exits 1 when direct capture is unavailable)
       --portal          always use the desktop portal (system picker)
   -r, --remember        remember the last source (default)
   -n, --no-remember     do not remember the source
   -s, --show            show the bridge window (debugging)
   -t, --title=TEXT      window title (default: Wayland Share Bridge)
   -f, --token-file=PATH restore token file used by the portal backend
-      --no-tray         do not create the tray icon
+      --no-tray         do not create the tray icon (the D-Bus control
+                        interface stays, so --status/--quit/--reselect/
+                        --source still work)
       --allow-multiple  allow more than one running instance
   -h, --help            show this help
   -V, --version         show the version
@@ -170,6 +182,7 @@ wayland-share-bridge --list-sources
 wayland-share-bridge --source=screen:DP-2
 wayland-share-bridge --source='window:firefox|DeepSeek' --no-tray
 wayland-share-bridge --portal --cursor=hidden
+wayland-share-bridge --search firefox   # filter the running instance's Windows menu
 ```
 
 ## Tray menu
@@ -177,16 +190,31 @@ wayland-share-bridge --portal --cursor=hidden
 | Entry | Action |
 | --- | --- |
 | **Stop sharing** | Stop mirroring; the bridge keeps running. |
-| **Show/Hide shared window** | Toggle the mirror window between visible/interactive and hidden/click-through. Drag the visible window with your compositor's usual mouse binding. |
-| `Screen: NAME (WxH)` | One click: mirror that monitor (checkmark = active). |
-| `Window: APP — TITLE` | One click: mirror that Wayland window (checkmark = active). |
+| **Show/Hide shared window** | Toggle the mirror window between visible and hidden. It stays click-through in both states; move it with your compositor's usual mouse binding (Super+drag in Hyprland). |
+| **Screens ▸** | Submenu with one `Screen: NAME (WxH)` entry per monitor. |
+| **Windows ▸** | Submenu grouped by application: `firefox (3) ▸ window title`. |
 | **Share via system portal...** | Portal picker (same as `--reselect`). |
 | **Quit** | Stop the bridge. |
+| Header row (`Wayland Share Bridge vVERSION`) | The tray host renders the SNI tooltip title here; the version is part of it. |
 
-The menu is flat (no submenus), because tray hosts hydrate nested submenus
-inconsistently; the current source is marked with a checkmark and the SNI
-tooltip shows the sharing status.  The list is refreshed from the
-compositor's current outputs and toplevels every time the menu is opened.
+The current source is marked with a checkmark.  The version is in the menu
+header (the SNI tooltip title), not in a menu entry of its own.  The source
+lists are refreshed from the compositor's current outputs and toplevels every
+time a submenu is opened.
+
+dbusmenu has no text input field, so the search is driven from a terminal (or
+a key binding):
+
+```sh
+wayland-share-bridge --search firefox   # only windows matching "firefox"
+wayland-share-bridge --search ""        # clear the filter
+```
+
+While a filter is active, the first entry of **Windows ▸** reads
+`Search: firefox (clear)`; clicking it clears the filter.  Matching is a
+case-insensitive substring over the app id, window title and identifier.
+Long titles are ellipsized and applications are grouped into submenus, so
+menu entries stay short enough for narrow tray popups.
 
 ## Making the bridge window invisible
 
@@ -204,6 +232,13 @@ hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden",
 It falls back to `hyprctl keyword windowrulev2 ...` on Hyprland versions with
 the legacy parser.  See [docs/hyprland.md](docs/hyprland.md).
 
+## Log file
+
+Started from the desktop entry there is no terminal, so
+`wayland-share-bridge-launch` appends the bridge's stderr to
+`$XDG_STATE_HOME/wayland-share-bridge/bridge.log` (truncated when it grows
+past 1 MiB).  Run the binary directly to see the messages on the terminal.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -214,6 +249,7 @@ the legacy parser.  See [docs/hyprland.md](docs/hyprland.md).
 | WPS still shows a black thumbnail | You are sharing the X11 screen, not the bridge window. Pick **Wayland Share Bridge**. |
 | Window is visible on screen | Use the launcher, or add the Hyprland rule manually. |
 | Cursor missing in the mirror | Only monitor capture paints the cursor; window capture does not. |
+| Black mirror for one window | The window is off-screen or on a hidden workspace; Hyprland does not render frames for it. Bring it into view; the bridge retries every 2 s and says so in the tray tooltip/`--status`. |
 | Colors swapped | Report the compositor/shm format; only XRGB8888/ARGB8888 are used. |
 | Portal keeps asking every time | Hyprland does not return a restore token; direct capture does not need one. |
 
@@ -222,10 +258,18 @@ More: [docs/troubleshooting.md](docs/troubleshooting.md) and
 
 ## Limitations
 
-- Region capture (a rectangle on a screen) is not implemented.
+- Region capture needs direct capture: `--source=region:DP-2,X,Y,W,H` mirrors
+  just that rectangle of the screen.  The portal backend cannot crop.
 - Audio is out of scope; share audio with your application's own options.
 - Window capture mirrors the window contents, not its decorations.
-- The frame loop paints at ~30 Hz; the cost depends on the resolution.
+- The frame loop paints at ~30 Hz.  Damage rectangles are only pushed to the
+  X server; the mirror window uses MIT-SHM when the server supports it, so a
+  4K share no longer copies every frame through the X11 socket.
+- Rotated outputs are un-rotated according to the transform the compositor
+  reports; a rotated monitor should be verified once after a compositor
+  upgrade.
+- The tray menu and the status text follow `LC_ALL`/`LC_MESSAGES`/`LANG`
+  (English or Chinese).
 - A remembered window source is a specific window: if the application is
   restarted, the remembered source no longer exists and the bridge starts
   idle instead.  Remembered *screen* sources survive restarts.

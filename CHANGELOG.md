@@ -2,6 +2,95 @@
 
 All notable changes to this project are documented here.
 
+## 1.4.0 - 2026-11-18
+
+- Crash fix: a window title or status text that was cut in the middle of a
+  UTF-8 code point made libdbus abort the whole bridge.  All fixed-size
+  buffers are now filled with a UTF-8 safe copy, and D-Bus string properties
+  are sanitised at the boundary.
+- `SIGHUP` now asks the running instance for a new source again: `poll()`'s
+  `EINTR` is no longer treated as a fatal error, and the signal handlers are
+  installed with `sigaction`.
+- The portal session is actually closed: `Session.Close` was sent to the
+  interface name instead of `org.freedesktop.portal.Desktop`, so sessions
+  and the compositor's "sharing" indicator stayed alive.
+- A PipeWire stream that failed to be created, connected or negotiated is
+  reported as a failure instead of showing a black "sharing" window.
+- Frame presentation uses MIT-SHM when the server supports it and only pushes
+  the damage rectangles the compositor reported; rotated outputs are handled
+  through the reported transform, and XBGR8888/ABGR8888 frames are accepted.
+- The source list refreshes once per menu open instead of twice.
+- `--show` and the tray toggle keep the mirror window click-through; the
+  window name is also exported as `_NET_WM_NAME` (UTF-8).
+- The tray reconnects when the session bus returns and re-registers the icon
+  when the StatusNotifierWatcher restarts; tooltip/status changes emit
+  `NewToolTip`/`NewStatus`.
+- dbusmenu fixes: unique separator ids, `GetGroupProperties` with an empty id
+  list returns all items, and menu id collisions are reported.
+- Hyprland: the binary falls back to the legacy rule syntax when the Lua
+  parser is unavailable; the cosmetic z-order call is fire-and-forget, so
+  showing the window no longer blocks the frame loop, and exited `hyprctl`
+  children are reaped from the event loop.
+- The state file is written with `mkstemp`+`flock`, is fsynced, and carries a
+  schema version; the portal restore token is created with mode 0600.
+- A source switch that fails clears the stale tray state; the remembered
+  source is no longer wiped by a self-overlapping `snprintf`.
+- `wayland-share-bridge-launch` appends diagnostics to
+  `$XDG_STATE_HOME/wayland-share-bridge/bridge.log` when started without a
+  terminal.
+- New: unit tests (`meson test`), ASan/UBSan CI job, systemd user unit,
+  AppStream metadata, and English/Chinese menu strings.
+- The release workflow packages the generated desktop file and man page from
+  the build directory again.
+
+## 1.3.1 - 2026-11-18
+
+- The version moved from a menu entry of its own into the menu header
+  (`Wayland Share Bridge vVERSION`, the SNI tooltip title), so the bottom of
+  the menu no longer has a version row.
+
+## 1.3.0 - 2026-11-18
+
+- The Windows submenu is grouped by application (`firefox (3) ▸ title`) and
+  sorted, so a long list stays navigable and entries stay short enough for
+  narrow tray popups; long titles are ellipsized.
+- Window search: `--search QUERY` (or the `SearchWindows` control method)
+  filters the Windows submenu; the menu shows `Search: QUERY (clear)` while
+  active, and clicking it clears the filter.
+
+## 1.2.0 - 2026-11-18
+
+- The tray menu is categorised: **Screens** and **Windows** are submenus
+  instead of one long flat list.
+- The version is visible in the application menu entry, the tray menu (as an
+  enabled entry, since some hosts hide disabled ones), the tooltip,
+  `--version` and `--status`.
+- No more silent black mirror: when the compositor does not complete a frame
+  within 2 s (an off-screen window or a hidden workspace) the bridge drops the
+  stuck frame, retries, and reports the stall in the tray/`--status`.
+
+## 1.1.0 - 2026-11-18
+
+- Version management: the version lives only in `meson.build`; the binary and
+  the manual page are generated from it.  The running version is shown in the
+  tray menu, the tray tooltip and `--status`.
+- Capture rate no longer drops to ~10 Hz while the tray exists: the D-Bus
+  dispatch is non-blocking.
+- Region capture: `--source=region:NAME,X,Y,W,H` mirrors a rectangle of a
+  screen (direct capture only).
+- `--source=SPEC` against a running instance now switches that instance
+  instead of refusing to start.
+- The D-Bus control interface (`--status`, `--quit`, `--reselect`,
+  `--source`) works under `--no-tray`.
+- `window:APP_ID` now matches a window by its app id; a non-empty id that
+  matches nothing fails instead of sharing an arbitrary window.
+- Fixed: corrupt `GetGroupProperties` replies, double close of the portal's
+  PipeWire descriptor, portal cursor modes (`cursor_mode` 1/2/4), the two
+  backends erasing each other's state file, stale tray state after a failed
+  capture, and Xlib use from the PipeWire thread without `XInitThreads()`.
+- PipeWire node failures are reported instead of showing a black window
+  forever; closed windows and unplugged outputs leave the source list.
+
 ## 1.0.0 - 2026-10-20
 
 First public release.

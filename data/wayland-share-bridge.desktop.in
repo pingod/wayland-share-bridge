@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Wayland Share Bridge
+Name=Wayland Share Bridge (@VERSION@)
 GenericName=Wayland to X11 screen sharing bridge
-Comment=Share Wayland screens and windows with X11 applications
+Comment=Share Wayland screens and windows with X11 applications (version @VERSION@)
 Exec=wayland-share-bridge-launch
 Icon=video-display
 Terminal=false
-Categories=Utility;Network;
+Categories=Utility;
 Keywords=share;screen;wayland;x11;bridge;portal;pipewire;
 StartupNotify=false

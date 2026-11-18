@@ -17,5 +17,26 @@ jobs:
             libx11-dev libxext-dev libxfixes-dev
       - name: Build
         run: |
-          meson setup build
+          meson setup build -Dwerror=true
           ninja -C build
+      - name: Test
+        run: meson test -C build --print-errorlogs
+      - name: Install (smoke test)
+        run: DESTDIR="$PWD/install" ninja -C build install
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build libdbus-1-dev \
+            libpipewire-0.3-dev libwayland-dev libwayland-bin \
+            libx11-dev libxext-dev libxfixes-dev
+      - name: Build with ASan/UBSan
+        run: |
+          meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
+          ninja -C build-asan
+      - name: Test under sanitizers
+        run: meson test -C build-asan --print-errorlogs

@@ -8,6 +8,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,8 @@
 #include <unistd.h>
 
 #include "dbus_handler.h"
+#include "state_file.h"
+#include "util.h"
 
 #define PORTAL_BUS "org.freedesktop.portal.Desktop"
 #define PORTAL_PATH "/org/freedesktop/portal/desktop"
@@ -67,8 +70,6 @@ static DBusMessage *wait_for_method_reply(struct ddata *data, DBusMessage *msg, 
 
 	dbus_error_init(&error);
 	reply = dbus_connection_send_with_reply_and_block(data->con, msg, timeout_ms, &error);
-	if(!reply)
-		dbus_error_free(&error);
 
 	return reply;
 }
@@ -260,31 +261,6 @@ static uint32_t parse_stream(DBusMessage *msg, struct source_info *info) {
 	return node_id;
 }
 
-static int mkdir_parents(const char *path) {
-	char *copy, *p;
-	int ret = 0;
-
-	copy = strdup(path);
-	if(!copy)
-		return -1;
-
-	for(p = copy + 1; *p; p++) {
-		if(*p != '/')
-			continue;
-
-		*p = 0;
-		if(mkdir(copy, 0700) != 0 && errno != EEXIST) {
-			ret = -1;
-			break;
-		}
-		*p = '/';
-	}
-
-	free(copy);
-
-	return ret;
-}
-
 static char *load_restore_token(const char *path) {
 	FILE *file;
 	char buffer[1024];
@@ -311,102 +287,69 @@ static char *load_restore_token(const char *path) {
 
 static void save_restore_token(const char *path, const char *token) {
 	FILE *file;
+	int fd;
 
 	if(!path || !token)
 		return;
 
-	if(mkdir_parents(path) != 0) {
+	if(path_mkdir_parents(path) != 0) {
 		fprintf(stderr, "warning: cannot create directories for %s\n", path);
 		return;
 	}
 
-	file = fopen(path, "w");
+	/* open() rather than fopen()+chmod(): the token must never be
+	 * readable by other users, not even for a moment. */
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if(fd < 0) {
+		fprintf(stderr, "warning: cannot save the restore token to %s\n", path);
+		return;
+	}
+	file = fdopen(fd, "w");
 	if(!file) {
+		close(fd);
 		fprintf(stderr, "warning: cannot save the restore token to %s\n", path);
 		return;
 	}
 	fprintf(file, "%s\n", token);
-	fclose(file);
-
-	chmod(path, 0600);
-}
-
-static char *state_path_for(const char *token_path) {
-	const char *slash;
-	char *path;
-	size_t length;
-
-	if(!token_path)
-		return NULL;
-
-	slash = strrchr(token_path, '/');
-	if(!slash)
-		return strdup("wayland-share-bridge.state");
-
-	length = (size_t) (slash - token_path) + 1;
-	path = malloc(length + sizeof("state"));
-	if(!path)
-		return NULL;
-
-	memcpy(path, token_path, length);
-	memcpy(path + length, "state", sizeof("state"));
-
-	return path;
+	if(fclose(file) != 0)
+		fprintf(stderr, "warning: cannot write the restore token to %s\n", path);
 }
 
 /* Returns SOURCE_KIND_ANY when nothing was remembered yet. */
 static enum source_kind load_remembered_kind(const char *token_path) {
-	char *path = state_path_for(token_path);
-	FILE *file;
-	char buffer[128];
+	char *path = state_path_for_token(token_path);
+	char *value;
 	enum source_kind kind = SOURCE_KIND_ANY;
 
 	if(!path)
 		return kind;
 
-	file = fopen(path, "r");
+	value = state_read(path, "source_kind");
 	free(path);
-	if(!file)
+	if(!value)
 		return kind;
 
-	while(fgets(buffer, sizeof(buffer), file)) {
-		buffer[strcspn(buffer, "\r\n")] = 0;
-		if(!strncmp(buffer, "source_kind=", 12)) {
-			const char *value = buffer + 12;
-
-			if(!strcmp(value, "screen"))
-				kind = SOURCE_KIND_SCREEN;
-			else if(!strcmp(value, "window"))
-				kind = SOURCE_KIND_WINDOW;
-		}
-	}
-	fclose(file);
+	if(!strcmp(value, "screen"))
+		kind = SOURCE_KIND_SCREEN;
+	else if(!strcmp(value, "window"))
+		kind = SOURCE_KIND_WINDOW;
+	free(value);
 
 	return kind;
 }
 
 static void save_remembered_kind(const char *token_path, enum source_kind kind) {
-	char *path = state_path_for(token_path);
-	FILE *file;
+	char *path;
 
+	if(kind != SOURCE_KIND_SCREEN && kind != SOURCE_KIND_WINDOW)
+		return;
+
+	path = state_path_for_token(token_path);
 	if(!path)
 		return;
-	if(kind != SOURCE_KIND_SCREEN && kind != SOURCE_KIND_WINDOW) {
-		free(path);
-		return;
-	}
-	if(mkdir_parents(path) != 0) {
-		free(path);
-		return;
-	}
 
-	file = fopen(path, "w");
+	state_write(path, "source_kind", kind == SOURCE_KIND_SCREEN ? "screen" : "window");
 	free(path);
-	if(!file)
-		return;
-
-	fprintf(file, "source_kind=%s\n", kind == SOURCE_KIND_SCREEN ? "screen" : "window");
-	fclose(file);
 }
 
 struct ddata *dhandler_init(enum cursor_mode cursor_mode, enum source_kind source_kind,
@@ -433,7 +376,15 @@ struct ddata *dhandler_init(enum cursor_mode cursor_mode, enum source_kind sourc
 		return NULL;
 	}
 
-	dbus_connection_get_unix_fd(data->con, &data->fd);
+	if(!dbus_connection_get_unix_fd(data->con, &data->fd)) {
+		fprintf(stderr, "Cannot get the session bus socket\n");
+		dbus_connection_unref(data->con);
+		free(data);
+		return NULL;
+	}
+	/* A session bus restart must tear the portal session down, not the
+	 * whole bridge. */
+	dbus_connection_set_exit_on_disconnect(data->con, FALSE);
 
 	/* Make sure the portal's Response signals are delivered to us. */
 	dbus_bus_add_match(data->con,
@@ -522,7 +473,9 @@ uint8_t dhandler_create_session(struct ddata *data) {
 	reply = wait_for_method_reply(data, msg, 10000);
 	dbus_message_unref(msg);
 	if(!reply) {
-		fprintf(stderr, "CreateSession failed: no reply from the portal\n");
+		fprintf(stderr, "CreateSession: %s\n",
+			error.message ? error.message : "no reply from the portal");
+		dbus_error_free(&error);
 		return 1;
 	}
 
@@ -605,7 +558,8 @@ static int select_sources(struct ddata *data, int with_cursor, int with_persist)
 	reply = wait_for_method_reply(data, msg, 10000);
 	dbus_message_unref(msg);
 	if(!reply) {
-		fprintf(stderr, "SelectSources: %s\n", error.message);
+		fprintf(stderr, "SelectSources: %s\n",
+			error.message ? error.message : "no reply from the portal");
 		dbus_error_free(&error);
 		return -1;
 	}
@@ -692,7 +646,9 @@ uint8_t dhandler_start(struct ddata *data) {
 	reply = wait_for_method_reply(data, msg, 10000);
 	dbus_message_unref(msg);
 	if(!reply) {
-		fprintf(stderr, "Start failed: no reply from the portal\n");
+		fprintf(stderr, "Start: %s\n",
+			error.message ? error.message : "no reply from the portal");
+		dbus_error_free(&error);
 		return 1;
 	}
 
@@ -772,7 +728,9 @@ uint8_t dhandler_open_pipewire_remote(struct ddata *data) {
 	reply = wait_for_method_reply(data, msg, 10000);
 	dbus_message_unref(msg);
 	if(!reply) {
-		fprintf(stderr, "OpenPipeWireRemote failed: no reply from the portal\n");
+		fprintf(stderr, "OpenPipeWireRemote: %s\n",
+			error.message ? error.message : "no reply from the portal");
+		dbus_error_free(&error);
 		return 1;
 	}
 
@@ -789,7 +747,11 @@ uint8_t dhandler_open_pipewire_remote(struct ddata *data) {
 }
 
 uint8_t dhandler_routine(struct ddata *data) {
-	return !dbus_connection_read_write_dispatch(data->con, 1000);
+	if(!dbus_connection_read_write(data->con, 0))
+		return 1;
+	while(dbus_connection_dispatch(data->con) == DBUS_DISPATCH_DATA_REMAINS)
+		;
+	return 0;
 }
 
 void dhandler_close_session(struct ddata *data) {
@@ -798,10 +760,11 @@ void dhandler_close_session(struct ddata *data) {
 	if(!data || !data->session)
 		return;
 
-	msg = dbus_message_new_method_call("org.freedesktop.portal.Session", data->session,
+	msg = dbus_message_new_method_call(PORTAL_BUS, data->session,
 		"org.freedesktop.portal.Session", "Close");
 	if(msg) {
-		dbus_connection_send(data->con, msg, NULL);
+		if(!dbus_connection_send(data->con, msg, NULL))
+			fprintf(stderr, "warning: cannot close the portal session\n");
 		dbus_message_unref(msg);
 	}
 	dbus_connection_flush(data->con);

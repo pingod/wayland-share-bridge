@@ -10,6 +10,9 @@
 # windows, so this launcher installs an equivalent Hyprland rule before the
 # window is mapped (opacity 0, floating, no blur).
 #
+# When the bridge is not started from a terminal its stderr is appended to
+# $XDG_STATE_HOME/wayland-share-bridge/bridge.log so failures are not lost.
+#
 # Set WAYLAND_SHARE_BRIDGE_BINARY to run a different binary and pass all
 # arguments through to it.
 
@@ -31,11 +34,25 @@ fi
 if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1; then
     # Hyprland 0.4x+ with the Lua config: hyprctl keyword is unavailable,
     # hyprctl eval is the supported interface.
-    if ! hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden", match = { class = "^wayland-share-bridge$" }, opacity = 0.0, float = true, no_blur = true })' >/dev/null 2>&1; then
+    if ! hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden", match = { class = "^wayland-share-bridge$" }, opacity = 0.0, float = true, no_blur = true, no_focus = true })' >/dev/null 2>&1; then
         # Legacy hyprland.conf parser.
-        hyprctl keyword windowrulev2 'opacity 0.0, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
-        hyprctl keyword windowrulev2 'float, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
-        hyprctl keyword windowrulev2 'no_blur, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
+        rule="windowrulev2"
+        hyprctl keyword "$rule" 'opacity 0.0, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
+        hyprctl keyword "$rule" 'float, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
+        hyprctl keyword "$rule" 'no_blur, class:^wayland-share-bridge$' >/dev/null 2>&1 || true
+    fi
+fi
+
+# Started from the desktop entry there is no terminal to read stderr from.
+if [ ! -t 2 ]; then
+    state_dir="${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/wayland-share-bridge"
+    if mkdir -p "$state_dir" 2>/dev/null; then
+        log="$state_dir/bridge.log"
+        # Keep the log bounded; it is diagnostics, not an audit trail.
+        if [ -f "$log" ] && [ "$(wc -c <"$log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+            : >"$log"
+        fi
+        exec "$BINARY" "$@" 2>>"$log"
     fi
 fi
 

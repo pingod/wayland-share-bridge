@@ -52,6 +52,7 @@
 
 ## 运行要求
 
+- PipeWire 0.3.44 或更新（流按 object serial 指定节点）。
 - Wayland 合成器支持 **XDG Desktop Portal ScreenCast**（PipeWire + 会话总线）；
   或者支持直接抓屏协议 `ext-image-copy-capture-v1`、
   `ext-image-capture-source-v1`、`ext-foreign-toplevel-list-v1`。
@@ -75,6 +76,7 @@
 ```sh
 meson setup build
 ninja -C build
+meson test -C build      # 纯函数的单元测试
 sudo ninja -C build install
 ```
 
@@ -84,6 +86,9 @@ sudo ninja -C build install
 - `/usr/local/bin/wayland-share-bridge-launch` – 启动脚本，额外配置 Hyprland 规则
 - `/usr/local/share/applications/wayland-share-bridge.desktop` – 桌面菜单项
 - `/usr/local/share/man/man1/wayland-share-bridge.1` – 手册页（`man wayland-share-bridge`）
+- `/usr/local/share/systemd/user/wayland-share-bridge.service` – systemd 用户单元
+  （`systemctl --user enable --now wayland-share-bridge`）
+- `/usr/local/share/metainfo/wayland-share-bridge.metainfo.xml` – AppStream 元数据
 
 ## 快速开始
 
@@ -94,12 +99,13 @@ sudo ninja -C build install
    ```
 
 2. 会出现一个名为 **Wayland Share Bridge** 的隐形窗口和一个托盘图标。
-   右键托盘图标选共享源：
-   - `Screen: DP-2 (2560x1440)` → 镜像该显示器
-   - `Window: firefox — ...` → 镜像该 Wayland 原生窗口
-   - **Show shared window** → 临时显示镜像窗口，本机确认正在共享什么
-   - **Stop sharing** → 停止共享但不退出程序
-   - **Share via system portal...** → 系统选择器（给不支持直接抓屏的合成器兜底）
+   右键托盘图标，在子菜单里选共享源：
+   - **屏幕 ▸** `DP-2 (2560x1440)` → 镜像该显示器
+   - **窗口 ▸** `firefox (3) ▸ 窗口标题` → 镜像该 Wayland 原生窗口
+   - **显示共享窗口** → 临时显示镜像窗口，本机确认正在共享什么
+     （显示时仍保持点击穿透，用合成器的拖动绑定移动它）
+   - **停止共享** → 停止共享但不退出程序
+   - **使用系统门户共享…** → 系统选择器（给不支持直接抓屏的合成器兜底）
 3. 在要共享的应用里打开共享对话框，选择 **Wayland Share Bridge** 窗口：
 
    - WPS 会议/协作：**共享 → 应用窗口 → Wayland Share Bridge**
@@ -127,8 +133,8 @@ sudo ninja -C build install
   -k, --source-kind=KIND
                         门户后端的源类型：auto、any、screen、window
                         （默认 auto）
-  -S, --source=SPEC     立刻共享指定源：screen:NAME 或
-                        window:APP_ID 或 window:APP_ID|TITLE
+  -S, --source=SPEC     立刻共享指定源：screen:NAME、window:APP_ID、
+                        window:APP_ID|TITLE 或 region:NAME,X,Y,W,H
   -L, --list-sources    列出可共享的屏幕和窗口
       --portal          强制走桌面门户（系统选择器）
   -r, --remember        记住上次的源（默认）
@@ -138,6 +144,10 @@ sudo ninja -C build install
   -f, --token-file=PATH 门户后端的 restore token 文件路径
       --no-tray         不创建托盘图标
       --allow-multiple  允许同时运行多个实例
+      --reselect[=KIND] 让运行中的实例通过门户重新选源
+      --status          打印运行中实例正在共享什么
+      --quit            停止运行中的实例
+      --search=QUERY    过滤运行中实例的“窗口”子菜单（空字符串清除过滤）
   -h, --help            显示帮助
   -V, --version         显示版本
 ```
@@ -148,6 +158,8 @@ sudo ninja -C build install
 wayland-share-bridge --list-sources
 wayland-share-bridge --source=screen:DP-2
 wayland-share-bridge --source='window:firefox|DeepSeek' --no-tray
+wayland-share-bridge --source=region:DP-2,100,200,1280,720
+wayland-share-bridge --search firefox
 wayland-share-bridge --portal --cursor=hidden
 ```
 
@@ -155,16 +167,26 @@ wayland-share-bridge --portal --cursor=hidden
 
 | 菜单项 | 作用 |
 | --- | --- |
-| **Stop sharing** | 停止共享，程序继续运行。 |
-| **Show/Hide shared window** | 切换镜像窗口的可见性（本机确认共享内容）。 |
-| `Screen: NAME (WxH)` | 点一下就镜像该显示器（勾选=正在共享）。 |
-| `Window: APP — TITLE` | 点一下就镜像该 Wayland 窗口（勾选=正在共享）。 |
-| **Share via system portal...** | 系统选择器（等价 `--reselect`）。 |
-| **Quit** | 停止桥接。 |
+| **停止共享** | 停止共享，程序继续运行。 |
+| **显示/隐藏共享窗口** | 切换镜像窗口的可见性；两种状态下都保持点击穿透。 |
+| **屏幕 ▸** | 每个显示器一项，`DP-2 (2560x1440)`；当前源带勾选。 |
+| **窗口 ▸** | 按应用分组：`firefox (3) ▸ 窗口标题`；当前源带勾选。 |
+| **使用系统门户共享…** | 系统选择器（等价 `--reselect`）。 |
+| **退出** | 停止桥接。 |
 
-菜单是扁平的（没有子菜单），因为不同托盘宿主对嵌套子菜单的 hydrate 行为不一致；
-当前共享的源用勾选标记，托盘 tooltip 里显示共享状态。
-每次打开菜单都会重新枚举合成器当前的输出和窗口，新开的窗口下次打开即可看到。
+菜单按类别分成子菜单，窗口列表按应用分组、长标题会省略；存在搜索过滤时，
+**窗口 ▸** 的第一项是 `搜索: QUERY（清除）`。当前共享的源用勾选标记，
+托盘 tooltip 里显示共享状态和版本。
+每次打开菜单都会重新枚举合成器当前的输出和窗口（50 ms 内的连续查询复用同一次
+合成器往返），新开的窗口下次打开即可看到。
+
+界面文案跟随 `LC_ALL`/`LC_MESSAGES`/`LANG`：中文环境显示中文菜单。
+
+## 日志
+
+从桌面菜单启动时没有终端，`wayland-share-bridge-launch` 会把桥接的 stderr
+追加到 `$XDG_STATE_HOME/wayland-share-bridge/bridge.log`（超过 1 MiB 时清空）。
+在终端直接运行二进制即可看到同样的输出。
 
 ## 让桥接窗口隐形
 
@@ -199,10 +221,12 @@ hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden",
 
 ## 限制
 
-- 不支持区域抓屏（屏幕上的一块矩形）。
+- 区域抓屏只在直连后端可用：`--source=region:DP-2,X,Y,W,H`。
 - 不处理音频；请用应用自身的音频共享选项。
 - 窗口抓屏镜像的是窗口内容，不含窗口装饰。
-- 帧循环约 30 Hz，开销随分辨率变化。
+- 帧循环约 30 Hz；只把合成器上报的脏矩形推给 X server，服务器支持
+  MIT-SHM 时不再经 X11 socket 拷贝整帧。
+- 旋转屏按合成器上报的 transform 旋转；合成器升级后建议再看一眼画面方向。
 - 记住的“窗口”源绑定具体窗口：应用重启后该源就不存在了，桥接会以未共享状态
   启动；记住的“整屏”源不受影响。
 - 系统门户兜底时，选择器打开期间桥接会阻塞；直接抓屏后端不会。

@@ -3,8 +3,8 @@
 All scenarios follow the same recipe:
 
 1. Start `wayland-share-bridge-launch` (starts hidden, tray icon appears).
-2. Right-click the tray icon and pick `Screen: DP-2 (2560x1440)` or
-   `Window: firefox — ...`.  One click, flat menu, no system picker.
+2. Right-click the tray icon, open **Screens** or **Windows** and pick an
+   entry.  Two clicks, no system picker; switch again any time.
 3. In the application, share the **Wayland Share Bridge** window.
 
 If the compositor does not support direct capture, start the bridge with
@@ -84,14 +84,14 @@ of the first one untouched.
 
 Switching is the whole point of the 1.2 tray menu:
 
-- **Tray menu → `Screen: DP-2 (2560x1440)`** - mirror a monitor.
-- **Tray menu → `Window: firefox — ...`** - mirror a window.
+- **Tray menu → Screens ▸ `DP-2 (2560x1440)`** - mirror a monitor.
+- **Tray menu → Windows ▸ firefox (3) ▸ title** - mirror a window.
 - **Tray menu → Share via system portal...** - fall back to the portal picker.
 - CLI: `wayland-share-bridge --source=window:kitty` (a running instance is
   controlled through the tray/control interface; for a one-shot switch use
   `--reselect=window`).
 - Signal: `kill -HUP $(pgrep -x wayland-share-bridge)` opens the portal
-  picker.
+  picker (the bridge keeps running).
 
 The same X11 window keeps its identity, so applications that already capture
 it pick up the new content without re-selecting the window.

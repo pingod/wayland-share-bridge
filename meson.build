@@ -1,6 +1,6 @@
 project('wayland-share-bridge',
         'c',
-        version : '1.0.0',
+        version : '1.4.0',
         license : 'EUPL-1.2',
         meson_version : '>= 0.60',
         default_options : ['warning_level=3', 'c_std=gnu11'])
@@ -10,9 +10,19 @@ if cc.has_argument('-Wno-pedantic')
     add_project_arguments('-Wno-pedantic', language : 'c')
 endif
 
+# The project version above is the only place the version is defined; the
+# binary and the manual page are generated from it.
+version_conf = configuration_data()
+version_conf.set_quoted('PROGRAM_VERSION', meson.project_version())
+configure_file(output : 'version.h', configuration : version_conf)
+
+man_conf = configuration_data()
+man_conf.set('VERSION', meson.project_version())
+
 deps = [
     dependency('dbus-1'),
-    dependency('libpipewire-0.3'),
+    # PW_KEY_TARGET_OBJECT was introduced in 0.3.44.
+    dependency('libpipewire-0.3', version : '>=0.3.44'),
     dependency('wayland-client'),
     dependency('x11'),
     dependency('xext'),
@@ -46,10 +56,15 @@ endforeach
 sources = files([
     'src/main.c',
     'src/dbus_handler.c',
+    'src/i18n.c',
+    'src/image_convert.c',
     'src/pipewire_handler.c',
+    'src/source_spec.c',
     'src/tray_handler.c',
+    'src/util.c',
     'src/wayland_capture.c',
     'src/x11_handler.c',
+    'src/state_file.c',
 ])
 
 executable('wayland-share-bridge',
@@ -61,7 +76,31 @@ install_data('data/wayland-share-bridge-launch',
              install_dir : get_option('bindir'),
              install_mode : 'rwxr-xr-x')
 
-install_data('data/wayland-share-bridge.desktop',
+install_data(configure_file(input : 'data/wayland-share-bridge.desktop.in',
+                            output : 'wayland-share-bridge.desktop',
+                            configuration : man_conf),
              install_dir : get_option('datadir') / 'applications')
 
-install_man('man/wayland-share-bridge.1')
+install_data('data/wayland-share-bridge.service',
+             install_dir : get_option('datadir') / 'systemd/user')
+
+install_data('data/wayland-share-bridge.metainfo.xml',
+             install_dir : get_option('datadir') / 'metainfo')
+
+install_man(configure_file(input : 'man/wayland-share-bridge.1.in',
+                           output : 'wayland-share-bridge.1',
+                           configuration : man_conf))
+
+# Unit tests cover the pure helpers: UTF-8 handling, source spec parsing,
+# frame conversion and the state file.
+unit_tests = executable('unit-tests',
+                        files([
+                            'tests/unit.c',
+                            'src/util.c',
+                            'src/source_spec.c',
+                            'src/image_convert.c',
+                            'src/state_file.c',
+                        ]),
+                        include_directories : 'src')
+
+test('unit', unit_tests, timeout : 120)

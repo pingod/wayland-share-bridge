@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -25,6 +26,7 @@
 #include "ext-image-capture-source-v1-client-protocol.h"
 #include "ext-image-copy-capture-v1-client-protocol.h"
 #include "ext-foreign-toplevel-list-v1-client-protocol.h"
+#include "util.h"
 #include "wayland_capture.h"
 
 #ifndef MFD_CLOEXEC
@@ -32,6 +34,8 @@
 #endif
 
 #define FRAME_INTERVAL_MS 33
+/* How long a frame may stay pending before it is considered stuck. */
+#define FRAME_TIMEOUT_MS 2000
 
 struct capture_output {
 	struct wl_output *output;
@@ -47,7 +51,6 @@ struct capture_toplevel {
 	char app_id[96];
 	char title[192];
 	char identifier[192];
-	int closed;
 	struct capture_toplevel *next;
 };
 
@@ -71,16 +74,37 @@ static struct {
 	size_t data_size;
 	int width;
 	int height;
+	int buffer_w;
+	int buffer_h;
 	uint32_t format;
+	int format_seen;
+	int format_rank;
+	int swap_rb;
 	int session_ready;
 	int frame_pending;
 	int stopped;
 	int failed;
 	uint32_t last_frame_ms;
+	uint32_t frame_request_ms;
+	int stalled;
+
+	struct source_request request;
+	int crop_x;
+	int crop_y;
+	unsigned int crop_w;
+	unsigned int crop_h;
+	int frame_damage;
+	int damage_seen;
+	int damage_x;
+	int damage_y;
+	int damage_w;
+	int damage_h;
+	int transform;
 
 	struct xdata *xdata;
 	enum source_kind current_kind;
-	char current_label[192];
+	char current_label[320];
+	char own_title[192];
 } cap = {
 	.format = WL_SHM_FORMAT_XRGB8888,
 };
@@ -92,10 +116,14 @@ static uint32_t now_ms(void) {
 	return (uint32_t) (ts.tv_sec * 1000ULL + ts.tv_nsec / 1000000ULL);
 }
 
+/* The tray queries the screen and the window list back to back; reuse one
+ * compositor roundtrip instead of doing two. */
+#define LIST_TTL_MS 50
+static int list_refreshed;
+static uint32_t last_list_ms;
+
 static void copy_text(char *dst, size_t size, const char *src) {
-	if(!src)
-		src = "";
-	snprintf(dst, size, "%s", src);
+	utf8_copy(dst, size, src);
 }
 
 /* ------------------------------------------------------------------ */
@@ -150,11 +178,30 @@ static const struct wl_output_listener output_listener = {
 /* ------------------------------------------------------------------ */
 /* ext_foreign_toplevel_handle_v1                                     */
 
-static void toplevel_handle_closed(void *data, struct ext_foreign_toplevel_handle_v1 *handle) {
-	struct capture_toplevel *item = data;
+/* The bridge's own mirror window is an XWayland toplevel without an app_id,
+ * so match it by title as well; capturing it would mirror the mirror. */
+static int is_own_toplevel(const struct capture_toplevel *item) {
+	if(!strcmp(item->app_id, "wayland-share-bridge"))
+		return 1;
+	return cap.own_title[0] && !strcmp(item->title, cap.own_title);
+}
 
+static void toplevel_remove(struct capture_toplevel *item) {
+	struct capture_toplevel **link = &cap.toplevels;
+
+	while(*link && *link != item)
+		link = &(*link)->next;
+	if(*link)
+		*link = item->next;
+
+	if(item->handle)
+		ext_foreign_toplevel_handle_v1_destroy(item->handle);
+	free(item);
+}
+
+static void toplevel_handle_closed(void *data, struct ext_foreign_toplevel_handle_v1 *handle) {
 	(void) handle;
-	item->closed = 1;
+	toplevel_remove(data);
 }
 
 static void toplevel_handle_done(void *data, struct ext_foreign_toplevel_handle_v1 *handle) {
@@ -219,13 +266,40 @@ static const struct ext_foreign_toplevel_list_v1_listener toplevel_list_listener
 /* ------------------------------------------------------------------ */
 /* capture session                                                    */
 
+/*
+ * X11 stores pixels as BGRx.  XRGB8888/ARGB8888 already match that layout,
+ * XBGR8888/ABGR8888 need the red and blue channels swapped.  The first
+ * format is not necessarily the best one, so every event is ranked.
+ */
+static int format_rank(uint32_t format) {
+	switch(format) {
+	case WL_SHM_FORMAT_XRGB8888:
+		return 0;
+	case WL_SHM_FORMAT_XBGR8888:
+		return 1;
+	case WL_SHM_FORMAT_ARGB8888:
+		return 2;
+	case WL_SHM_FORMAT_ABGR8888:
+		return 3;
+	default:
+		return -1;
+	}
+}
+
 static void session_shm_format(void *data, struct ext_image_copy_capture_session_v1 *session,
 			       uint32_t format) {
-	(void) data; (void) session;
-	/* XRGB8888 matches the X11 window layout best; keep looking if unset. */
-	if(format == WL_SHM_FORMAT_XRGB8888 || format == WL_SHM_FORMAT_ARGB8888) {
-		if(cap.format != WL_SHM_FORMAT_XRGB8888 || format == WL_SHM_FORMAT_XRGB8888)
-			cap.format = format;
+	int rank = format_rank(format);
+
+	(void) data;
+	(void) session;
+	if(rank < 0)
+		return;
+
+	cap.format_seen = 1;
+	if(rank < cap.format_rank) {
+		cap.format_rank = rank;
+		cap.format = format;
+		cap.swap_rb = (rank == 1 || rank == 3);
 	}
 }
 
@@ -265,15 +339,66 @@ static int create_shm_buffer(void) {
 		return -1;
 	cap.buffer = wl_shm_pool_create_buffer(pool, 0, cap.width, cap.height, stride, cap.format);
 	wl_shm_pool_destroy(pool);
-	return cap.buffer ? 0 : -1;
+	if(!cap.buffer)
+		return -1;
+	cap.buffer_w = cap.width;
+	cap.buffer_h = cap.height;
+	return 0;
+}
+
+/* Drops the frame, the shm buffer and the mapping in one place. */
+static void release_buffer(void) {
+	if(cap.frame) {
+		ext_image_copy_capture_frame_v1_destroy(cap.frame);
+		cap.frame = NULL;
+	}
+	cap.frame_pending = 0;
+	if(cap.buffer) {
+		wl_buffer_destroy(cap.buffer);
+		cap.buffer = NULL;
+	}
+	if(cap.data) {
+		munmap(cap.data, cap.data_size);
+		cap.data = NULL;
+	}
+	cap.data_size = 0;
+	cap.buffer_w = 0;
+	cap.buffer_h = 0;
 }
 
 static void frame_ready(void *data, struct ext_image_copy_capture_frame_v1 *frame) {
-	(void) data;
-	if(cap.xdata && cap.data)
-		xhandler_draw(cap.xdata, cap.data, (uint32_t) cap.data_size, cap.width * 4);
+	int rotated = (cap.transform == 1 || cap.transform == 3 ||
+		       cap.transform == 5 || cap.transform == 7);
+	unsigned int dst_w = rotated ? cap.crop_h : cap.crop_w;
+	unsigned int dst_h = rotated ? cap.crop_w : cap.crop_h;
 
+	(void) data;
+	if(cap.xdata && cap.data) {
+		if(cap.xdata->width != dst_w || cap.xdata->height != dst_h)
+			xhandler_resize(cap.xdata, dst_w, dst_h, cap.swap_rb);
+
+		/* Without damage the compositor copies the previous content again;
+		 * pushing it to the X server would be pure work. */
+		if(cap.frame_damage || !cap.damage_seen) {
+			if(xhandler_upload(cap.xdata, cap.data, (uint32_t) cap.data_size,
+					   cap.width * 4, cap.crop_x, cap.crop_y,
+					   cap.crop_w, cap.crop_h, cap.transform) == 0) {
+				if(cap.transform == 0 && cap.damage_seen && cap.frame_damage) {
+					xhandler_present(cap.xdata,
+							 cap.damage_x - cap.crop_x,
+							 cap.damage_y - cap.crop_y,
+							 (unsigned int) cap.damage_w,
+							 (unsigned int) cap.damage_h);
+				} else {
+					xhandler_present(cap.xdata, 0, 0, dst_w, dst_h);
+				}
+			}
+		}
+		if(cap.frame_damage)
+			cap.damage_seen = 1;
+	}
 	cap.frame_pending = 0;
+	cap.stalled = 0;
 	cap.last_frame_ms = now_ms();
 	ext_image_copy_capture_frame_v1_destroy(frame);
 	cap.frame = NULL;
@@ -291,12 +416,47 @@ static void frame_failed(void *data, struct ext_image_copy_capture_frame_v1 *fra
 
 static void frame_transform(void *data, struct ext_image_copy_capture_frame_v1 *frame,
 			    uint32_t transform) {
-	(void) data; (void) frame; (void) transform;
+	(void) data; (void) frame;
+	cap.transform = (int) transform;
 }
 
 static void frame_damage(void *data, struct ext_image_copy_capture_frame_v1 *frame,
 			 int32_t x, int32_t y, int32_t width, int32_t height) {
-	(void) data; (void) frame; (void) x; (void) y; (void) width; (void) height;
+	int x0 = x, y0 = y, x1 = x + width, y1 = y + height;
+	int nx0, ny0, nx1, ny1;
+
+	(void) data; (void) frame;
+	if(width <= 0 || height <= 0)
+		return;
+
+	if(x0 < 0)
+		x0 = 0;
+	if(y0 < 0)
+		y0 = 0;
+	if(cap.width > 0 && x1 > cap.width)
+		x1 = cap.width;
+	if(cap.height > 0 && y1 > cap.height)
+		y1 = cap.height;
+	if(x1 <= x0 || y1 <= y0)
+		return;
+
+	if(cap.frame_damage) {
+		nx0 = x0 < cap.damage_x ? x0 : cap.damage_x;
+		ny0 = y0 < cap.damage_y ? y0 : cap.damage_y;
+		nx1 = x1 > cap.damage_x + cap.damage_w ? x1 : cap.damage_x + cap.damage_w;
+		ny1 = y1 > cap.damage_y + cap.damage_h ? y1 : cap.damage_y + cap.damage_h;
+	} else {
+		nx0 = x0;
+		ny0 = y0;
+		nx1 = x1;
+		ny1 = y1;
+	}
+
+	cap.damage_x = nx0;
+	cap.damage_y = ny0;
+	cap.damage_w = nx1 - nx0;
+	cap.damage_h = ny1 - ny0;
+	cap.frame_damage = 1;
 }
 
 static void frame_presentation_time(void *data, struct ext_image_copy_capture_frame_v1 *frame,
@@ -320,19 +480,63 @@ static void session_buffer_size(void *data, struct ext_image_copy_capture_sessio
 }
 
 static void session_done(void *data, struct ext_image_copy_capture_session_v1 *session) {
+	unsigned int cx = 0, cy = 0, cw, ch;
+
 	(void) data; (void) session;
 	if(cap.width <= 0 || cap.height <= 0) {
 		fprintf(stderr, "capture: session reported no buffer size\n");
 		cap.failed = 1;
 		return;
 	}
+	if(!cap.format_seen) {
+		fprintf(stderr, "capture: the compositor offered no supported shm format\n");
+		cap.failed = 1;
+		return;
+	}
+
+	/* A second done (resize, mode change) keeps the buffer when nothing
+	 * about the geometry changed. */
+	if(cap.buffer && cap.width == cap.buffer_w && cap.height == cap.buffer_h)
+		return;
+
+	release_buffer();
+
+	cw = (unsigned int) cap.width;
+	ch = (unsigned int) cap.height;
+	if(cap.request.cropped) {
+		if(cap.request.x >= cap.width || cap.request.y >= cap.height) {
+			fprintf(stderr, "capture: the region is outside the screen\n");
+			cap.failed = 1;
+			return;
+		}
+		cx = (unsigned int) cap.request.x;
+		cy = (unsigned int) cap.request.y;
+		cw = cap.request.width;
+		if(cw > (unsigned int) cap.width - cx)
+			cw = (unsigned int) cap.width - cx;
+		ch = cap.request.height;
+		if(ch > (unsigned int) cap.height - cy)
+			ch = (unsigned int) cap.height - cy;
+		if(cw == 0 || ch == 0) {
+			fprintf(stderr, "capture: empty region\n");
+			cap.failed = 1;
+			return;
+		}
+	}
+
 	if(create_shm_buffer() != 0) {
 		fprintf(stderr, "capture: cannot allocate a shm buffer\n");
 		cap.failed = 1;
 		return;
 	}
+
+	cap.crop_x = (int) cx;
+	cap.crop_y = (int) cy;
+	cap.crop_w = cw;
+	cap.crop_h = ch;
+
 	if(cap.xdata)
-		xhandler_resize(cap.xdata, (unsigned int) cap.width, (unsigned int) cap.height, 0);
+		xhandler_resize(cap.xdata, cw, ch, cap.swap_rb);
 
 	cap.session_ready = 1;
 }
@@ -389,7 +593,22 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 }
 
 static void registry_global_remove(void *data, struct wl_registry *registry, uint32_t name) {
-	(void) data; (void) registry; (void) name;
+	struct capture_output **link = &cap.outputs;
+
+	(void) data; (void) registry;
+	while(*link && (*link)->name != name)
+		link = &(*link)->next;
+	if(!*link)
+		return;
+
+	{
+		struct capture_output *item = *link;
+
+		*link = item->next;
+		if(item->output)
+			wl_output_destroy(item->output);
+		free(item);
+	}
 }
 
 static const struct wl_registry_listener registry_listener = {
@@ -400,12 +619,18 @@ static const struct wl_registry_listener registry_listener = {
 /* ------------------------------------------------------------------ */
 /* public API                                                         */
 
-int wlcap_init(void) {
+int wlcap_init(const char *own_title) {
+	if(own_title)
+		snprintf(cap.own_title, sizeof(cap.own_title), "%s", own_title);
+	else
+		cap.own_title[0] = '\0';
+
 	cap.display = wl_display_connect(NULL);
 	if(!cap.display) {
 		fprintf(stderr, "capture: cannot connect to the compositor\n");
 		return -1;
 	}
+	list_refreshed = 0;
 	cap.registry = wl_display_get_registry(cap.display);
 	if(!cap.registry) {
 		wlcap_destroy();
@@ -423,14 +648,6 @@ int wlcap_init(void) {
 	return 0;
 }
 
-int wlcap_fd(void) {
-	return cap.display ? wl_display_get_fd(cap.display) : -1;
-}
-
-int wlcap_flush(void) {
-	return cap.display ? wl_display_flush(cap.display) : -1;
-}
-
 int wlcap_dispatch(void) {
 	struct pollfd pfd;
 
@@ -440,27 +657,71 @@ int wlcap_dispatch(void) {
 		if(wl_display_dispatch_pending(cap.display) < 0)
 			return -1;
 	}
-	wl_display_flush(cap.display);
+	if(wl_display_flush(cap.display) < 0 && errno != EAGAIN)
+		return -1;
 	pfd.fd = wl_display_get_fd(cap.display);
 	pfd.events = POLLIN;
 	pfd.revents = 0;
-	if(poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
-		if(wl_display_read_events(cap.display) < 0)
-			return -1;
-	} else {
-		wl_display_cancel_read(cap.display);
+	{
+		int ret = poll(&pfd, 1, 0);
+
+		if(ret > 0 && (pfd.revents & POLLIN)) {
+			if(wl_display_read_events(cap.display) < 0)
+				return -1;
+		} else {
+			wl_display_cancel_read(cap.display);
+			/* HUP/ERR without data: the compositor went away. */
+			if(ret > 0 && (pfd.revents & (POLLHUP | POLLERR)))
+				return -1;
+		}
 	}
 	if(wl_display_dispatch_pending(cap.display) < 0)
 		return -1;
 	return 0;
 }
 
-static int output_label(char *buf, size_t size, const struct capture_output *item) {
-	const char *name = item->name_text[0] ? item->name_text : "output";
+/*
+ * wl_output v4 and later report a connector name; older compositors do not,
+ * so fall back to a stable position based id instead of an empty string that
+ * makes every output indistinguishable.
+ */
+static void output_id(const struct capture_output *item, char *buf, size_t size) {
+	const struct capture_output *it;
+	int index = 0;
 
+	if(item->name_text[0]) {
+		snprintf(buf, size, "%s", item->name_text);
+		return;
+	}
+	for(it = cap.outputs; it && it != item; it = it->next)
+		index++;
+	snprintf(buf, size, "output%d", index);
+}
+
+static int output_label(char *buf, size_t size, const struct capture_output *item) {
+	char name[96];
+
+	output_id(item, name, sizeof(name));
 	if(item->width > 0 && item->height > 0)
 		return snprintf(buf, size, "%s (%dx%d)", name, item->width, item->height) < (int) size ? 0 : -1;
 	return snprintf(buf, size, "%s", name) < (int) size ? 0 : -1;
+}
+
+static int compare_sources(const void *left, const void *right) {
+	const struct capture_source *a = left;
+	const struct capture_source *b = right;
+	int result;
+
+	if(a->kind != b->kind)
+		return a->kind < b->kind ? -1 : 1;
+	result = strcasecmp(a->kind == SOURCE_KIND_WINDOW && a->group[0] ? a->group : "Other",
+			    b->kind == SOURCE_KIND_WINDOW && b->group[0] ? b->group : "Other");
+	if(result)
+		return result;
+	result = strcasecmp(a->title, b->title);
+	if(result)
+		return result;
+	return strcasecmp(a->id, b->id);
 }
 
 int wlcap_list(enum source_kind kind, struct capture_source **list) {
@@ -473,19 +734,33 @@ int wlcap_list(enum source_kind kind, struct capture_source **list) {
 	if(!cap.display)
 		return 0;
 
-	/* Refresh the toplevel/output state. */
-	if(wl_display_roundtrip(cap.display) < 0)
-		return 0;
+	/* Refresh the toplevel/output state.  The tray asks for the screen and
+	 * the window list back to back, so a very recent roundtrip is reused. */
+	if(!list_refreshed || (int32_t) (now_ms() - last_list_ms) >= LIST_TTL_MS) {
+		if(wl_display_roundtrip(cap.display) < 0)
+			return 0;
+		list_refreshed = 1;
+		last_list_ms = now_ms();
+	}
 
 	if(kind == SOURCE_KIND_SCREEN || kind == SOURCE_KIND_ANY) {
 		for(output = cap.outputs; output; output = output->next) {
-			items = realloc(items, sizeof(*items) * (count + 1));
-			if(!items)
+			char id[96];
+			char label[192];
+			struct capture_source *grown = realloc(items, sizeof(*items) * (count + 1));
+
+			if(!grown) {
+				free(items);
 				return 0;
+			}
+			items = grown;
 			memset(&items[count], 0, sizeof(items[count]));
 			items[count].kind = SOURCE_KIND_SCREEN;
-			copy_text(items[count].id, sizeof(items[count].id), output->name_text);
-			output_label(items[count].label, sizeof(items[count].label), output);
+			output_id(output, id, sizeof(id));
+			copy_text(items[count].id, sizeof(items[count].id), id);
+			output_label(label, sizeof(label), output);
+			copy_text(items[count].label, sizeof(items[count].label), label);
+			copy_text(items[count].title, sizeof(items[count].title), label);
 			count++;
 		}
 	}
@@ -494,23 +769,27 @@ int wlcap_list(enum source_kind kind, struct capture_source **list) {
 		for(toplevel = cap.toplevels; toplevel; toplevel = toplevel->next) {
 			char id[192];
 			char label[192];
+			char raw[420];
 			int i, duplicates = 0;
 
-			if(toplevel->closed)
-				continue;
-			if(!strcmp(toplevel->app_id, "wayland-share-bridge"))
+			if(is_own_toplevel(toplevel))
 				continue; /* skip our own mirror window */
 			/* The foreign-toplevel identifier is unique for every window,
 			 * which keeps two windows with the same title apart. */
-			if(toplevel->identifier[0])
-				snprintf(id, sizeof(id), "%s", toplevel->identifier);
-			else
-				snprintf(id, sizeof(id), "%s|%s", toplevel->app_id, toplevel->title);
-			if(toplevel->app_id[0])
-				snprintf(label, sizeof(label), "%s — %s",
+			if(toplevel->identifier[0]) {
+				copy_text(id, sizeof(id), toplevel->identifier);
+			} else {
+				snprintf(raw, sizeof(raw), "%s|%s",
 					 toplevel->app_id, toplevel->title);
-			else
-				snprintf(label, sizeof(label), "%s", toplevel->title);
+				copy_text(id, sizeof(id), raw);
+			}
+			if(toplevel->app_id[0]) {
+				snprintf(raw, sizeof(raw), "%s — %s",
+					 toplevel->app_id, toplevel->title);
+				copy_text(label, sizeof(label), raw);
+			} else {
+				copy_text(label, sizeof(label), toplevel->title);
+			}
 			for(i = 0; i < count; i++) {
 				size_t len;
 
@@ -527,64 +806,77 @@ int wlcap_list(enum source_kind kind, struct capture_source **list) {
 				snprintf(numbered, sizeof(numbered), "%s (%d)", label, duplicates + 1);
 				copy_text(label, sizeof(label), numbered);
 			}
-			items = realloc(items, sizeof(*items) * (count + 1));
-			if(!items)
-				return 0;
+			{
+				struct capture_source *grown = realloc(items, sizeof(*items) * (count + 1));
+
+				if(!grown) {
+					free(items);
+					return 0;
+				}
+				items = grown;
+			}
 			memset(&items[count], 0, sizeof(items[count]));
 			items[count].kind = SOURCE_KIND_WINDOW;
 			copy_text(items[count].id, sizeof(items[count].id), id);
 			copy_text(items[count].label, sizeof(items[count].label), label);
+			copy_text(items[count].group, sizeof(items[count].group),
+				  toplevel->app_id);
+			copy_text(items[count].title, sizeof(items[count].title),
+				  toplevel->title);
 			count++;
 		}
 	}
+
+	/* A stable order keeps the grouped menu from jumping around. */
+	if(count > 1)
+		qsort(items, (size_t) count, sizeof(*items), compare_sources);
 
 	*list = items;
 	return count;
 }
 
-static int match_source(enum source_kind kind, const char *id, struct capture_output **out_output,
+static int match_source(const struct source_request *req,
+			struct capture_output **out_output,
 			struct capture_toplevel **out_toplevel) {
 	struct capture_output *output;
 	struct capture_toplevel *toplevel;
-	int window_fallback = -1;
 
 	*out_output = NULL;
 	*out_toplevel = NULL;
 
-	if(kind == SOURCE_KIND_SCREEN || kind == SOURCE_KIND_ANY) {
+	if(req->kind == SOURCE_KIND_SCREEN || req->kind == SOURCE_KIND_ANY) {
 		for(output = cap.outputs; output; output = output->next) {
-			if(!id || !id[0] || !strcmp(output->name_text, id)) {
+			char id[96];
+
+			output_id(output, id, sizeof(id));
+			if(!req->id[0] || !strcmp(id, req->id)) {
 				*out_output = output;
 				return 0;
 			}
 		}
 	}
 
-	if(kind == SOURCE_KIND_WINDOW || kind == SOURCE_KIND_ANY) {
+	if(req->kind == SOURCE_KIND_WINDOW || req->kind == SOURCE_KIND_ANY) {
 		for(toplevel = cap.toplevels; toplevel; toplevel = toplevel->next) {
 			char window_id[192];
 
-			if(toplevel->closed)
+			if(is_own_toplevel(toplevel))
 				continue;
-			if(!strcmp(toplevel->app_id, "wayland-share-bridge"))
-				continue;
-			if(window_fallback < 0)
-				window_fallback = 0;
-			snprintf(window_id, sizeof(window_id), "%s|%s",
-				 toplevel->app_id, toplevel->title);
-			if(id && id[0] &&
-			   (!strcmp(toplevel->identifier, id) || !strcmp(window_id, id) ||
-			    !strcmp(toplevel->title, id))) {
+			if(!req->id[0]) {
 				*out_toplevel = toplevel;
 				return 0;
 			}
-		}
-		if(window_fallback >= 0) {
-			for(toplevel = cap.toplevels; toplevel; toplevel = toplevel->next) {
-				if(!toplevel->closed && strcmp(toplevel->app_id, "wayland-share-bridge")) {
-					*out_toplevel = toplevel;
-					return 0;
-				}
+			char raw[420];
+
+			snprintf(raw, sizeof(raw), "%s|%s",
+				 toplevel->app_id, toplevel->title);
+			copy_text(window_id, sizeof(window_id), raw);
+			if(!strcmp(toplevel->identifier, req->id) ||
+			   !strcmp(window_id, req->id) ||
+			   !strcmp(toplevel->title, req->id) ||
+			   !strcmp(toplevel->app_id, req->id)) {
+				*out_toplevel = toplevel;
+				return 0;
 			}
 		}
 	}
@@ -593,11 +885,7 @@ static int match_source(enum source_kind kind, const char *id, struct capture_ou
 }
 
 static void destroy_capture(void) {
-	if(cap.frame) {
-		ext_image_copy_capture_frame_v1_destroy(cap.frame);
-		cap.frame = NULL;
-	}
-	cap.frame_pending = 0;
+	release_buffer();
 	if(cap.session) {
 		ext_image_copy_capture_session_v1_destroy(cap.session);
 		cap.session = NULL;
@@ -606,45 +894,63 @@ static void destroy_capture(void) {
 		ext_image_capture_source_v1_destroy(cap.source);
 		cap.source = NULL;
 	}
-	if(cap.buffer) {
-		wl_buffer_destroy(cap.buffer);
-		cap.buffer = NULL;
-	}
-	if(cap.data) {
-		munmap(cap.data, cap.data_size);
-		cap.data = NULL;
-	}
-	cap.data_size = 0;
 	cap.width = 0;
 	cap.height = 0;
 	cap.session_ready = 0;
 	cap.stopped = 0;
 	cap.failed = 0;
+	cap.crop_x = 0;
+	cap.crop_y = 0;
+	cap.crop_w = 0;
+	cap.crop_h = 0;
+	cap.frame_damage = 0;
+	cap.damage_seen = 0;
+	cap.damage_x = 0;
+	cap.damage_y = 0;
+	cap.damage_w = 0;
+	cap.damage_h = 0;
+	cap.transform = 0;
+	cap.format_seen = 0;
+	cap.format_rank = 99;
+	cap.swap_rb = 0;
+	cap.stalled = 0;
+	cap.frame_request_ms = 0;
 	if(cap.display)
 		wl_display_flush(cap.display);
 }
 
-int wlcap_start(enum source_kind kind, const char *id, struct xdata *xdata) {
+int wlcap_start(const struct source_request *req, struct xdata *xdata) {
 	struct capture_output *output = NULL;
 	struct capture_toplevel *toplevel = NULL;
 	uint32_t options = 0;
+	uint32_t deadline;
 
-	if(!cap.display)
+	if(!cap.display || !req)
 		return -1;
 
 	/* Resolve the source before tearing down the current capture, so a
 	 * stale menu entry does not blank the window that is being shared. */
-	if(match_source(kind, id, &output, &toplevel) != 0) {
+	if(match_source(req, &output, &toplevel) != 0) {
 		fprintf(stderr, "capture: no matching source\n");
 		return -1;
 	}
 	wlcap_stop();
+	cap.request = *req;
 
 	if(output) {
 		cap.source = ext_output_image_capture_source_manager_v1_create_source(
 			cap.output_source_mgr, output->output);
 		cap.current_kind = SOURCE_KIND_SCREEN;
-		output_label(cap.current_label, sizeof(cap.current_label), output);
+		if(req->cropped) {
+			char label[192];
+
+			output_label(label, sizeof(label), output);
+			snprintf(cap.current_label, sizeof(cap.current_label),
+				 "%s region %d,%d %ux%u", label,
+				 req->x, req->y, req->width, req->height);
+		} else {
+			output_label(cap.current_label, sizeof(cap.current_label), output);
+		}
 		options = EXT_IMAGE_COPY_CAPTURE_MANAGER_V1_OPTIONS_PAINT_CURSORS;
 	} else {
 		cap.source = ext_foreign_toplevel_image_capture_source_manager_v1_create_source(
@@ -660,6 +966,10 @@ int wlcap_start(enum source_kind kind, const char *id, struct xdata *xdata) {
 
 	cap.xdata = xdata;
 	cap.format = WL_SHM_FORMAT_XRGB8888;
+	cap.format_seen = 0;
+	cap.format_rank = 99;
+	cap.swap_rb = 0;
+	cap.transform = 0;
 	cap.last_frame_ms = now_ms();
 	cap.session = ext_image_copy_capture_manager_v1_create_session(cap.capture_mgr,
 								       cap.source, options);
@@ -671,10 +981,37 @@ int wlcap_start(enum source_kind kind, const char *id, struct xdata *xdata) {
 	ext_image_copy_capture_session_v1_add_listener(cap.session, &session_listener, NULL);
 	wl_display_flush(cap.display);
 
-	/* Wait for the session handshake so the first frame can go out. */
+	/* Wait for the session handshake with a deadline: a compositor that
+	 * never answers must not freeze the UI. */
+	deadline = now_ms() + 1500;
 	while(!cap.session_ready && !cap.stopped && !cap.failed) {
-		if(wl_display_roundtrip(cap.display) < 0)
-			break;
+		struct pollfd pfd;
+		int ret;
+
+		if((int32_t) (now_ms() - deadline) >= 0) {
+			fprintf(stderr, "capture: the session was not accepted\n");
+			destroy_capture();
+			return -1;
+		}
+
+		pfd.fd = wl_display_get_fd(cap.display);
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		ret = poll(&pfd, 1, 50);
+		if(ret < 0) {
+			if(errno == EINTR)
+				continue;
+			fprintf(stderr, "capture: the session was not accepted\n");
+			destroy_capture();
+			return -1;
+		}
+		if(ret > 0 && (pfd.revents & POLLIN)) {
+			if(wl_display_dispatch(cap.display) < 0) {
+				fprintf(stderr, "capture: lost the compositor connection\n");
+				destroy_capture();
+				return -1;
+			}
+		}
 	}
 	if(!cap.session_ready) {
 		fprintf(stderr, "capture: the session was not accepted\n");
@@ -699,12 +1036,38 @@ const char *wlcap_current_label(void) {
 	return cap.current_label;
 }
 
+int wlcap_stalled(void) {
+	return cap.stalled;
+}
+
 void wlcap_tick(void) {
-	if(!cap.display || !cap.session_ready || cap.frame_pending || !cap.buffer)
+	if(!cap.display || !cap.session_ready || !cap.buffer)
 		return;
+
+	if(cap.frame_pending) {
+		if((int32_t) (now_ms() - cap.frame_request_ms) < FRAME_TIMEOUT_MS)
+			return;
+
+		/* Some compositors (Hyprland among them) never complete a frame
+		 * for a window that is off-screen or on a hidden workspace: the
+		 * frame is left pending forever and the mirror would stay black.
+		 * Drop it and ask again; the caller surfaces the stall. */
+		if(cap.frame) {
+			ext_image_copy_capture_frame_v1_destroy(cap.frame);
+			cap.frame = NULL;
+		}
+		cap.frame_pending = 0;
+		if(!cap.stalled)
+			fprintf(stderr, "capture: no frame from the compositor in %d ms; "
+				"retrying (is the source off-screen or hidden?)\n",
+				FRAME_TIMEOUT_MS);
+		cap.stalled = 1;
+	}
+
 	if(now_ms() - cap.last_frame_ms < FRAME_INTERVAL_MS)
 		return;
 
+	cap.frame_damage = 0;
 	cap.frame = ext_image_copy_capture_session_v1_create_frame(cap.session);
 	if(!cap.frame) {
 		cap.failed = 1;
@@ -715,6 +1078,7 @@ void wlcap_tick(void) {
 	ext_image_copy_capture_frame_v1_damage_buffer(cap.frame, 0, 0, cap.width, cap.height);
 	ext_image_copy_capture_frame_v1_capture(cap.frame);
 	cap.frame_pending = 1;
+	cap.frame_request_ms = now_ms();
 	wl_display_flush(cap.display);
 }
 
@@ -723,6 +1087,9 @@ void wlcap_destroy(void) {
 	struct capture_toplevel *toplevel, *next_toplevel;
 
 	destroy_capture();
+	memset(&cap.request, 0, sizeof(cap.request));
+	cap.current_kind = SOURCE_KIND_ANY;
+	cap.current_label[0] = '\0';
 	if(cap.toplevel_list) {
 		ext_foreign_toplevel_list_v1_destroy(cap.toplevel_list);
 		cap.toplevel_list = NULL;

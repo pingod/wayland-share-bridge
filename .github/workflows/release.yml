@@ -22,18 +22,26 @@ jobs:
 
       - name: Build
         run: |
-          meson setup build --buildtype=release
+          meson setup build --buildtype=release -Dwerror=true
           ninja -C build
+
+      - name: Test
+        run: meson test -C build --print-errorlogs
 
       - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"
           dest="wayland-share-bridge-${version}-linux-x86_64"
-          mkdir -p "$dest/bin" "$dest/share/applications" "$dest/share/man/man1"
+          mkdir -p "$dest/bin" "$dest/share/applications" "$dest/share/man/man1" \
+                   "$dest/share/systemd/user" "$dest/share/metainfo"
+          # The desktop entry and the man page are generated into the build
+          # directory from their .in templates.
           cp build/wayland-share-bridge "$dest/bin/"
           cp data/wayland-share-bridge-launch "$dest/bin/"
-          cp data/wayland-share-bridge.desktop "$dest/share/applications/"
-          cp man/wayland-share-bridge.1 "$dest/share/man/man1/"
+          cp build/wayland-share-bridge.desktop "$dest/share/applications/"
+          cp build/wayland-share-bridge.1 "$dest/share/man/man1/"
+          cp data/wayland-share-bridge.service "$dest/share/systemd/user/"
+          cp data/wayland-share-bridge.metainfo.xml "$dest/share/metainfo/"
           cp README.md README.zh-CN.md LICENSE NOTICE "$dest/"
           tar -czf "$dest.tar.gz" "$dest"
 

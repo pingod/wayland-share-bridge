@@ -12,6 +12,9 @@ wayland-share-bridge --list-sources
 # Is an instance running, and what is it sharing?
 wayland-share-bridge --status
 
+# Diagnostics of a bridge started from the desktop entry
+tail -n 50 "${XDG_STATE_HOME:-$HOME/.local/state}/wayland-share-bridge/bridge.log"
+
 # Tray host present?
 busctl --user list | grep -i StatusNotifierWatcher
 ```
@@ -93,19 +96,29 @@ See [hyprland.md](hyprland.md).
 
 ## High CPU / latency
 
-- Frame rate is capped at ~30 Hz; cost grows with resolution.
+- Frame rate is capped at ~30 Hz; cost grows with resolution.  Only changed
+  rectangles are pushed to the X server and MIT-SHM is used when available,
+  so the X11 side no longer copies whole frames through the socket.
 - Mirror a window instead of a 4K monitor if possible.
 - Use `--source=screen:...` with the smallest monitor you need.
+
+## The tray icon disappears after the tray host restarts
+
+The bridge re-registers itself when the StatusNotifierWatcher appears again;
+give it a second.  If it does not come back, check the log at the top of this
+page — losing the session bus entirely is reported there and the bridge
+retries every 5 s.
 
 ## `Could not register app ID` warning
 
 Only relevant to the portal backend; harmless (the tray connection registers a
 name first).  Direct capture does not use the portal.
 
-## `--status` hangs or times out
+## `--status` reports that no instance is running
 
-- No instance is running: `--status` waits for a reply.  Check `pgrep -f
-  wayland-share-bridge`.
+- `--status` exits 1 with "No running wayland-share-bridge instance found"
+  when nothing owns the control name.  Check `pgrep -f
+  wayland-share-bridge`; a crashed process leaves no name behind.
 - The instance is stuck in a portal picker: cancel the picker, or
   `kill -TERM` it; it replies to control requests between portal steps.
 

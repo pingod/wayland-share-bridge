@@ -3,8 +3,10 @@
  * x11_handler.c - the X11 side of the bridge.
  *
  * Creates a plain X11 window that X11 clients (WPS Office, Zoom, Feishu,
- * Electron apps, ...) can see and capture, then paints every received
- * PipeWire frame into it with plain XPutImage.  No toolkit, no GL.
+ * Electron apps, ...) can see and capture, then paints every received frame
+ * into it.  When the server supports MIT-SHM the frame is shared with the
+ * server instead of being copied through the X11 socket; otherwise plain
+ * XPutImage() is used.
  */
 
 #include <stdio.h>
@@ -17,7 +19,26 @@
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/shape.h>
 
+#include <sys/ipc.h>
+#include <sys/shm.h>
+
+#include "image_convert.h"
 #include "x11_handler.h"
+
+/*
+ * The default Xlib error handler exits the process.  A BadLength (an
+ * oversized PutImage) or a BadWindow (the window vanished with the
+ * compositor) must not take the whole bridge down, so errors are logged and
+ * the loop keeps running.
+ */
+static int x_error_handler(Display *display, XErrorEvent *event) {
+	char text[128];
+
+	XGetErrorText(display, event->error_code, text, sizeof(text));
+	fprintf(stderr, "X11 error: %s (request %d.%d)\n", text,
+		event->request_code, event->minor_code);
+	return 0;
+}
 
 static void set_cardinal(Display *dpy, Window win, const char *name, unsigned long value) {
 	Atom atom = XInternAtom(dpy, name, False);
@@ -34,6 +55,39 @@ static void set_window_type(Display *dpy, Window win) {
 		(unsigned char *) &normal, 1);
 }
 
+/*
+ * WM_NAME is Latin-1 per ICCCM; window pickers read _NET_WM_NAME.  Both are
+ * set so non-ASCII titles show up correctly.
+ */
+static void set_window_name(Display *dpy, Window win, const char *title) {
+	Atom utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+	Atom net_name = XInternAtom(dpy, "_NET_WM_NAME", False);
+	Atom net_icon = XInternAtom(dpy, "_NET_WM_ICON_NAME", False);
+	size_t length = strlen(title);
+
+	XStoreName(dpy, win, title);
+	XChangeProperty(dpy, win, net_name, utf8, 8, PropModeReplace,
+		(const unsigned char *) title, (int) length);
+	XChangeProperty(dpy, win, net_icon, utf8, 8, PropModeReplace,
+		(const unsigned char *) title, (int) length);
+}
+
+/*
+ * The window is never meant to appear in a task list or pager: it is an
+ * off-screen paint target that only exists so X11 clients can capture it.
+ */
+static void set_window_state(Display *dpy, Window win) {
+	Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
+	Atom atoms[2];
+
+	atoms[0] = XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
+	atoms[1] = XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False);
+
+	XChangeProperty(dpy, win, state, XA_ATOM, 32, PropModeReplace,
+		(unsigned char *) atoms, 2);
+}
+
+/* Clicks go through to whatever is below the mirror window. */
 static void make_input_transparent(Display *dpy, Window win) {
 	XserverRegion empty = XFixesCreateRegion(dpy, NULL, 0);
 
@@ -41,14 +95,139 @@ static void make_input_transparent(Display *dpy, Window win) {
 	XFixesDestroyRegion(dpy, empty);
 }
 
+static void shm_release(struct xdata *data) {
+	if(data->shm_attached) {
+		XSync(data->display, False);
+		XShmDetach(data->display, &data->shminfo);
+		data->shm_attached = 0;
+	}
+	if(data->shm_addr) {
+		shmdt(data->shm_addr);
+		data->shm_addr = NULL;
+	}
+	if(data->shminfo.shmid >= 0) {
+		shmctl(data->shminfo.shmid, IPC_RMID, NULL);
+		data->shminfo.shmid = -1;
+	}
+}
+
+static void image_free(struct xdata *data) {
+	if(!data->image)
+		return;
+
+	if(data->shm_addr) {
+		/* The pixels belong to the segment, not to Xlib. */
+		data->image->data = NULL;
+		XDestroyImage(data->image);
+	} else {
+		XDestroyImage(data->image);	/* also frees data->buffer */
+	}
+	data->image = NULL;
+	data->buffer = NULL;
+	shm_release(data);
+}
+
+/* XShmAttach() reports server side failures asynchronously. */
+static int shm_attach_failed;
+
+static int shm_error_handler(Display *display, XErrorEvent *event) {
+	(void) display;
+	(void) event;
+	shm_attach_failed = 1;
+	return 0;
+}
+
+static int shm_image_alloc(struct xdata *data, unsigned int width, unsigned int height,
+			   size_t bytes) {
+	Visual *visual = DefaultVisual(data->display, DefaultScreen(data->display));
+	int depth = DefaultDepth(data->display, DefaultScreen(data->display));
+	int (*old_handler)(Display *, XErrorEvent *);
+
+	data->shminfo.shmid = shmget(IPC_PRIVATE, bytes, IPC_CREAT | 0600);
+	if(data->shminfo.shmid < 0)
+		return -1;
+
+	data->shminfo.shmaddr = shmat(data->shminfo.shmid, NULL, 0);
+	if(data->shminfo.shmaddr == (char *) -1) {
+		data->shminfo.shmaddr = NULL;
+		return -1;
+	}
+	data->shminfo.readOnly = False;
+
+	shm_attach_failed = 0;
+	old_handler = XSetErrorHandler(shm_error_handler);
+	XShmAttach(data->display, &data->shminfo);
+	XSync(data->display, False);
+	XSetErrorHandler(old_handler);
+	if(shm_attach_failed)
+		return -1;
+
+	data->shm_attached = 1;
+	data->shm_addr = data->shminfo.shmaddr;
+	data->image = XShmCreateImage(data->display, visual, depth, ZPixmap,
+				      data->shminfo.shmaddr, &data->shminfo,
+				      width, height);
+	if(!data->image || !data->image->data)
+		return -1;
+
+	data->buffer = (uint32_t *) data->image->data;
+	return 0;
+}
+
+static int image_alloc(struct xdata *data, unsigned int width, unsigned int height) {
+	size_t bytes = (size_t) width * height * 4;
+	Visual *visual = DefaultVisual(data->display, DefaultScreen(data->display));
+	int depth = DefaultDepth(data->display, DefaultScreen(data->display));
+
+	if(bytes == 0)
+		return -1;
+
+	if(data->use_shm && shm_image_alloc(data, width, height, bytes) == 0)
+		return 0;
+
+	if(data->image) {
+		data->image->data = NULL;
+		XDestroyImage(data->image);
+		data->image = NULL;
+	}
+	data->buffer = NULL;
+	shm_release(data);
+	/* One failure is enough; do not retry SHM for every resize. */
+	data->use_shm = 0;
+
+	data->buffer = malloc(bytes);
+	if(!data->buffer)
+		return -1;
+
+	data->image = XCreateImage(data->display, visual, depth, ZPixmap, 0,
+				   (char *) data->buffer, width, height, 32, 0);
+	if(!data->image) {
+		free(data->buffer);
+		data->buffer = NULL;
+		return -1;
+	}
+
+	return 0;
+}
+
 struct xdata *xhandler_init(const struct options *opts) {
 	struct xdata *data;
 	XSetWindowAttributes attrs;
 	XClassHint class_hint;
 
+	/* The PipeWire thread paints through the same Display as the main
+	 * loop, so Xlib must serialise access to it. */
+	if(!XInitThreads()) {
+		fprintf(stderr, "Cannot initialise Xlib threading support\n");
+		return NULL;
+	}
+
+	XSetErrorHandler(x_error_handler);
+
 	data = calloc(1, sizeof(struct xdata));
 	if(!data)
 		return NULL;
+	data->shminfo.shmid = -1;
 
 	data->display = XOpenDisplay(NULL);
 	if(!data->display) {
@@ -56,6 +235,8 @@ struct xdata *xhandler_init(const struct options *opts) {
 		free(data);
 		return NULL;
 	}
+
+	data->use_shm = XShmQueryExtension(data->display) ? 1 : 0;
 
 	attrs.background_pixel = 0;
 	attrs.event_mask = ExposureMask | StructureNotifyMask;
@@ -65,13 +246,14 @@ struct xdata *xhandler_init(const struct options *opts) {
 		CWBackPixel | CWEventMask, &attrs);
 	data->fd = ConnectionNumber(data->display);
 
-	XStoreName(data->display, data->window, opts->title);
+	set_window_name(data->display, data->window, opts->title);
 
 	class_hint.res_name = (char *) opts->class_name;
 	class_hint.res_class = (char *) opts->class_name;
 	XSetClassHint(data->display, data->window, &class_hint);
 
 	set_window_type(data->display, data->window);
+	set_window_state(data->display, data->window);
 	set_cardinal(data->display, data->window, "_NET_WM_PID", (unsigned long) getpid());
 
 	/*
@@ -80,7 +262,6 @@ struct xdata *xhandler_init(const struct options *opts) {
 	 * ignores the property for XWayland windows, so the launcher script
 	 * installs an equivalent window rule there; see data/.
 	 */
-	/* Hidden by default: empty input region so clicks go through. */
 	make_input_transparent(data->display, data->window);
 
 	if(!opts->show)
@@ -93,74 +274,30 @@ struct xdata *xhandler_init(const struct options *opts) {
 	return data;
 }
 
-static void set_input_region(struct xdata *data, int interactive) {
-	XWindowAttributes attr;
-	XserverRegion region;
-
-	if(!XGetWindowAttributes(data->display, data->window, &attr))
-		return;
-
-	if(interactive) {
-		XRectangle rect;
-
-		rect.x = 0;
-		rect.y = 0;
-		rect.width = (unsigned short) attr.width;
-		rect.height = (unsigned short) attr.height;
-		region = XFixesCreateRegion(data->display, &rect, 1);
-	} else {
-		region = XFixesCreateRegion(data->display, NULL, 0);
-	}
-
-	XFixesSetWindowShapeRegion(data->display, data->window, ShapeInput, 0, 0,
-				   region);
-	XFixesDestroyRegion(data->display, region);
-}
-
-void xhandler_set_visible(struct xdata *data, int visible) {
-	if(!data || !data->display || !data->window)
-		return;
-
-	visible = visible ? 1 : 0;
-	set_cardinal(data->display, data->window, "_NET_WM_WINDOW_OPACITY",
-		     visible ? 0xffffffffUL : 0);
-	set_input_region(data, visible);
-	if(visible)
-		XRaiseWindow(data->display, data->window);
-	data->visible = visible;
-	XFlush(data->display);
-}
-
 void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height, int swap_rb) {
 	XWindowChanges changes;
 
-	if(width == 0 || height == 0 || width > 16384 || height > 16384)
+	if(!data || !data->display)
 		return;
 
-	if(data->image) {
-		XDestroyImage(data->image);	/* also frees data->buffer */
-		data->image = NULL;
-		data->buffer = NULL;
+	if(width == 0 || height == 0 || width > 16384 || height > 16384) {
+		fprintf(stderr, "Refusing a %ux%u frame (limits are 1..16384)\n", width, height);
+		return;
 	}
+
+	if(data->image && width == data->width && height == data->height) {
+		data->swap_rb = swap_rb;
+		return;
+	}
+
+	image_free(data);
 
 	data->width = width;
 	data->height = height;
 	data->swap_rb = swap_rb;
 
-	data->buffer = malloc((size_t) width * height * 4);
-	if(!data->buffer) {
+	if(image_alloc(data, width, height) != 0) {
 		fprintf(stderr, "Out of memory for a %ux%u frame\n", width, height);
-		return;
-	}
-
-	data->image = XCreateImage(data->display,
-		DefaultVisual(data->display, DefaultScreen(data->display)),
-		(unsigned int) DefaultDepth(data->display, DefaultScreen(data->display)),
-		ZPixmap, 0, (char *) data->buffer, width, height, 32, 0);
-	if(!data->image) {
-		fprintf(stderr, "XCreateImage failed for a %ux%u frame\n", width, height);
-		free(data->buffer);
-		data->buffer = NULL;
 		return;
 	}
 
@@ -170,68 +307,108 @@ void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height
 	XFlush(data->display);
 }
 
-void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_t stride) {
-	const unsigned char *src = pixels;
-	unsigned char *dst;
-	unsigned int row, x;
-	size_t row_bytes, rows;
+int xhandler_upload(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,
+		    int src_x, int src_y, unsigned int width, unsigned int height,
+		    int transform) {
+	if(!data || !data->image || !data->buffer || stride <= 0 || !pixels)
+		return -1;
 
-	if(!data->image || !data->buffer || data->width == 0 || data->height == 0)
+	return image_convert((unsigned char *) data->buffer, data->width, data->height,
+			     (size_t) data->width * 4,
+			     pixels, size, stride,
+			     src_x, src_y, width, height,
+			     data->swap_rb, transform);
+}
+
+void xhandler_present(struct xdata *data, int x, int y, unsigned int width, unsigned int height) {
+	int max_w, max_h;
+
+	if(!data || !data->image || !data->display)
 		return;
 
-	row_bytes = (size_t) data->width * 4;
-	if(stride <= 0 || (size_t) stride < row_bytes)
-		stride = (int32_t) row_bytes;
+	max_w = (int) data->width;
+	max_h = (int) data->height;
 
-	rows = (size_t) size / (size_t) stride;
-	if(rows > data->height)
-		rows = data->height;
+	if(x < 0) {
+		unsigned int cut = (unsigned int) (-x);
 
-	/* Keep the rest of the last (partial) frame black. */
-	memset(data->buffer, 0, row_bytes * data->height);
-
-	for(row = 0; row < rows; row++) {
-		const unsigned char *s = src + (size_t) row * (size_t) stride;
-		dst = (unsigned char *) data->buffer + (size_t) row * row_bytes;
-
-		if(data->swap_rb) {
-			/* Source is RGBA/RGBx, X11 wants BGRx in memory. */
-			for(x = 0; x < data->width; x++) {
-				dst[x * 4 + 0] = s[x * 4 + 2];
-				dst[x * 4 + 1] = s[x * 4 + 1];
-				dst[x * 4 + 2] = s[x * 4 + 0];
-				dst[x * 4 + 3] = 0xff;
-			}
-		} else {
-			memcpy(dst, s, row_bytes);
-		}
+		if(width <= cut)
+			return;
+		width -= cut;
+		x = 0;
 	}
+	if(y < 0) {
+		unsigned int cut = (unsigned int) (-y);
 
-	XPutImage(data->display, data->window,
-		DefaultGC(data->display, DefaultScreen(data->display)),
-		data->image, 0, 0, 0, 0, data->width, data->height);
+		if(height <= cut)
+			return;
+		height -= cut;
+		y = 0;
+	}
+	if(x >= max_w || y >= max_h)
+		return;
+	if((int) width > max_w - x)
+		width = (unsigned int) (max_w - x);
+	if((int) height > max_h - y)
+		height = (unsigned int) (max_h - y);
+	if(width == 0 || height == 0)
+		return;
+
+	if(data->shm_attached) {
+		/*
+		 * XShmPutImage copies from the shared segment inside the server;
+		 * after XSync() the segment can be reused for the next frame.
+		 */
+		XShmPutImage(data->display, data->window,
+			     DefaultGC(data->display, DefaultScreen(data->display)),
+			     data->image, x, y, x, y, width, height, False);
+		XSync(data->display, False);
+	} else {
+		XPutImage(data->display, data->window,
+			  DefaultGC(data->display, DefaultScreen(data->display)),
+			  data->image, x, y, x, y, width, height);
+		XFlush(data->display);
+	}
+}
+
+void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,
+		   int src_x, int src_y, unsigned int width, unsigned int height,
+		   int transform) {
+	if(xhandler_upload(data, pixels, size, stride, src_x, src_y, width, height, transform) == 0)
+		xhandler_present(data, 0, 0, data->width, data->height);
+}
+
+void xhandler_set_visible(struct xdata *data, int visible) {
+	if(!data || !data->display || !data->window)
+		return;
+
+	visible = visible ? 1 : 0;
+	set_cardinal(data->display, data->window, "_NET_WM_WINDOW_OPACITY",
+		     visible ? 0xffffffffUL : 0);
+	/* The window stays click-through even when it is shown. */
+	make_input_transparent(data->display, data->window);
+	if(visible)
+		XRaiseWindow(data->display, data->window);
+	data->visible = visible;
 	XFlush(data->display);
 }
 
-uint8_t xhandler_routine(struct xdata *data) {
+void xhandler_routine(struct xdata *data) {
+	if(!data || !data->display)
+		return;
+
 	while(XPending(data->display)) {
 		XEvent ev;
 
 		XNextEvent(data->display, &ev);
 	}
-
-	return 0;
 }
 
 void xhandler_destroy(struct xdata *data) {
 	if(!data)
 		return;
 
-	if(data->image) {
-		XDestroyImage(data->image);
-		data->image = NULL;
-		data->buffer = NULL;
-	}
+	image_free(data);
 	if(data->display) {
 		if(data->window)
 			XDestroyWindow(data->display, data->window);

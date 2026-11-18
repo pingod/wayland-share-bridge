@@ -11,6 +11,12 @@
 struct pdata {
 	struct xdata *xdata;
 	uint32_t node_id;
+	uint32_t width;
+	uint32_t height;
+	/* Set when the stream cannot be created, connected or negotiated. */
+	int failed;
+	/* Set when the stream stops or reports an error. */
+	int lost;
 
 	struct pw_thread_loop *loop;
 	struct pw_context *context;
@@ -23,11 +29,16 @@ struct pdata {
 	struct spa_hook stream_listener;
 };
 
+/*
+ * Connects to the portal's PipeWire node.  The caller keeps ownership of fd:
+ * the handler works on a private duplicate, which PipeWire closes when the
+ * core is disconnected.  Returns NULL when the node does not appear.
+ */
 struct pdata *phandler_init(int fd, uint32_t node_id, struct xdata *xdata);
 
-int phandler_connection_lost(void);
+int phandler_connection_lost(struct pdata *data);
 
-void phandler_clear_connection_lost(void);
+void phandler_clear_connection_lost(struct pdata *data);
 
 void phandler_destroy(struct pdata *data);
 

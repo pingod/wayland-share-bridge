@@ -4,10 +4,11 @@
 
 #include <stdint.h>
 
+/* Values accepted by the portal's ScreenCast cursor_mode option. */
 enum cursor_mode {
-	CURSOR_HIDDEN = 0,
-	CURSOR_EMBEDDED = 1,
-	CURSOR_METADATA = 2,
+	CURSOR_HIDDEN = 1,
+	CURSOR_EMBEDDED = 2,
+	CURSOR_METADATA = 4,
 };
 
 /*
@@ -20,6 +21,15 @@ enum source_kind {
 	SOURCE_KIND_ANY = 0,
 	SOURCE_KIND_SCREEN = 1,
 	SOURCE_KIND_WINDOW = 2,
+};
+
+/* What the direct capture backend should mirror. */
+struct source_request {
+	enum source_kind kind;   /* SCREEN or WINDOW */
+	char id[192];            /* output name / toplevel identifier, "" = first */
+	int cropped;             /* 1 = take x,y,width,height out of the screen */
+	int x, y;
+	unsigned int width, height;
 };
 
 struct source_info {

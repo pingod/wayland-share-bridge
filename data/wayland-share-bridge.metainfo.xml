@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>wayland-share-bridge</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>EUPL-1.2</project_license>
+  <name>Wayland Share Bridge</name>
+  <!-- The component id has to match the desktop file basename; AppStream
+       warns that it is not reverse-DNS, which is accepted here. -->
+  <developer id="io.github.pingod">
+    <name>wayland-share-bridge contributors</name>
+  </developer>
+  <summary>Share Wayland screens and windows with X11 applications</summary>
+  <description>
+    <p>
+      Mirrors a Wayland screen or window into an ordinary X11 window so that
+      X11 and XWayland applications (WPS Office, Zoom, Feishu, Electron
+      applications, browsers, OBS, ...) can share it.  The source is picked
+      from the tray menu, either through the compositor's direct capture
+      protocols or, as a fallback, through the desktop portal.
+    </p>
+  </description>
+  <launchable type="desktop-id">wayland-share-bridge.desktop</launchable>
+  <url type="homepage">https://github.com/pingod/wayland-share-bridge</url>
+  <provides>
+    <binary>wayland-share-bridge</binary>
+  </provides>
+  <releases>
+    <release version="1.4.0" date="2026-11-18"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

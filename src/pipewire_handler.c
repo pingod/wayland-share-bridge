@@ -9,7 +9,9 @@
  * the two orders).
  */
 
+#include <fcntl.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include <spa/debug/types.h>
 #include <spa/param/video/format-utils.h>
@@ -52,9 +54,14 @@ static void stream_param_changed(void *dat, uint32_t id, const struct spa_pod *p
 	default:
 		fprintf(stderr, "Unsupported pixel format: %s (only xRGB/RGBx/ARGB/BGRA are supported)\n",
 			spa_debug_type_find_name(spa_type_video_format, raw->format));
+		/* Without a usable format the mirror would stay black forever. */
+		data->failed = 1;
+		data->lost = 1;
 		return;
 	}
 
+	data->width = raw->size.width;
+	data->height = raw->size.height;
 	xhandler_resize(data->xdata, raw->size.width, raw->size.height, swap_rb);
 }
 
@@ -77,22 +84,26 @@ static void stream_process(void *dat) {
 	}
 
 	d = &buf->datas[0];
-	xhandler_draw(data->xdata, d->data, d->chunk->size, d->chunk->stride);
+	if(d->chunk->size == 0) {
+		pw_stream_queue_buffer(data->stream, b);
+		return;
+	}
+	xhandler_draw(data->xdata, (const uint8_t *) d->data + d->chunk->offset,
+		      d->chunk->size, d->chunk->stride,
+		      0, 0, data->width, data->height, 0);
 
 	pw_stream_queue_buffer(data->stream, b);
 }
 
-static volatile int stream_lost;
-
 static void stream_state_changed(void *dat, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
-	(void) dat;
+	struct pdata *data = dat;
 
 	if(state == PW_STREAM_STATE_ERROR) {
 		fprintf(stderr, "PipeWire stream error: %s\n", error ? error : "unknown error");
-		stream_lost = 1;
+		data->lost = 1;
 	} else if(state == PW_STREAM_STATE_UNCONNECTED && old >= PW_STREAM_STATE_PAUSED) {
 		fprintf(stderr, "PipeWire stream disconnected\n");
-		stream_lost = 1;
+		data->lost = 1;
 	}
 }
 
@@ -112,6 +123,11 @@ static void init_stream(struct pdata *data, const char *serial) {
 	props = pw_properties_new(PW_KEY_TARGET_OBJECT, serial, NULL);
 
 	data->stream = pw_stream_new(data->core, "wayland-share-bridge", props);
+	if(!data->stream) {
+		fprintf(stderr, "Cannot create the PipeWire stream\n");
+		data->failed = 1;
+		return;
+	}
 	pw_stream_add_listener(data->stream, &data->stream_listener, &stream_events, data);
 
 	/*
@@ -130,8 +146,12 @@ static void init_stream(struct pdata *data, const char *serial) {
 					SPA_VIDEO_FORMAT_RGBx,
 					SPA_VIDEO_FORMAT_RGBA));
 
-	pw_stream_connect(data->stream, SPA_DIRECTION_INPUT, PW_ID_ANY,
-		PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, params, 1);
+	if(pw_stream_connect(data->stream, SPA_DIRECTION_INPUT, PW_ID_ANY,
+			     PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS,
+			     params, 1) < 0) {
+		fprintf(stderr, "Cannot connect the PipeWire stream\n");
+		data->failed = 1;
+	}
 }
 
 static void registry_global(void *dat, uint32_t id, uint32_t permissions, const char *type, uint32_t version, const struct spa_dict *props) {
@@ -148,6 +168,7 @@ static void registry_global(void *dat, uint32_t id, uint32_t permissions, const 
 	serial = spa_dict_lookup_item(props, PW_KEY_OBJECT_SERIAL);
 	if(!serial || !serial->value) {
 		fprintf(stderr, "PipeWire node %u has no object.serial\n", id);
+		data->failed = 1;
 		return;
 	}
 
@@ -161,54 +182,117 @@ static const struct pw_registry_events registry_events = {
 
 struct pdata *phandler_init(int fd, uint32_t node_id, struct xdata *xdata) {
 	struct pdata *data;
+	int dup_fd, ready = 0, i;
 
 	data = calloc(1, sizeof(struct pdata));
 	if(!data)
 		return NULL;
 
+	/* PipeWire closes the descriptor it is given, so hand it a duplicate
+	 * and leave the portal's fd to the caller. */
+	dup_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+	if(dup_fd < 0) {
+		free(data);
+		return NULL;
+	}
+
 	data->node_id = node_id;
 	data->xdata = xdata;
-	stream_lost = 0;
+	data->lost = 0;
 
 	data->loop = pw_thread_loop_new("pipewire thread", NULL);
 	if(!data->loop) {
+		close(dup_fd);
 		free(data);
 		return NULL;
 	}
 
 	pw_thread_loop_lock(data->loop);
-	pw_thread_loop_start(data->loop);
+	if(pw_thread_loop_start(data->loop) != 0) {
+		pw_thread_loop_unlock(data->loop);
+		close(dup_fd);
+		pw_thread_loop_destroy(data->loop);
+		free(data);
+		return NULL;
+	}
 
 	data->context = pw_context_new(pw_thread_loop_get_loop(data->loop), NULL, 0);
-	data->core = pw_context_connect_fd(data->context, fd, NULL, 0);
+	if(!data->context) {
+		pw_thread_loop_unlock(data->loop);
+		close(dup_fd);
+		phandler_destroy(data);
+		return NULL;
+	}
+
+	data->core = pw_context_connect_fd(data->context, dup_fd, NULL, 0);
+	if(!data->core) {
+		fprintf(stderr, "Cannot connect to the portal's PipeWire socket\n");
+		pw_thread_loop_unlock(data->loop);
+		phandler_destroy(data);
+		return NULL;
+	}
 	data->registry = pw_core_get_registry(data->core, PW_VERSION_REGISTRY, 0);
+	if(!data->registry) {
+		pw_thread_loop_unlock(data->loop);
+		phandler_destroy(data);
+		return NULL;
+	}
 
 	spa_zero(data->registry_listener);
 	pw_registry_add_listener(data->registry, &data->registry_listener, &registry_events, data);
 
 	pw_thread_loop_unlock(data->loop);
 
+	/* Wait for the registry to deliver the node, so a failed
+	 * OpenPipeWireRemote becomes a visible error instead of a black
+	 * "sharing" window that never updates. */
+	for(i = 0; i < 40 && !ready; i++) {
+		pw_thread_loop_lock(data->loop);
+		ready = data->stream != NULL || data->failed;
+		pw_thread_loop_unlock(data->loop);
+		if(!ready)
+			usleep(50 * 1000);
+	}
+	if(!ready) {
+		fprintf(stderr, "The portal node did not appear\n");
+		phandler_destroy(data);
+		return NULL;
+	}
+	/* A stream that failed to be created or connected must be reported as
+	 * such: the caller only treats a non-NULL pdata as "sharing started". */
+	if(data->failed || !data->stream) {
+		fprintf(stderr, "The portal stream could not be created\n");
+		phandler_destroy(data);
+		return NULL;
+	}
+
 	return data;
 }
 
-int phandler_connection_lost(void) {
-	return stream_lost;
+int phandler_connection_lost(struct pdata *data) {
+	return data ? data->lost : 0;
 }
 
-void phandler_clear_connection_lost(void) {
-	stream_lost = 0;
+void phandler_clear_connection_lost(struct pdata *data) {
+	if(data)
+		data->lost = 0;
 }
 
 void phandler_destroy(struct pdata *data) {
 	if(!data)
 		return;
 
-	pw_thread_loop_stop(data->loop);
+	if(data->loop)
+		pw_thread_loop_stop(data->loop);
 	if(data->stream)
 		pw_stream_destroy(data->stream);
-	pw_proxy_destroy((struct pw_proxy *) data->registry);
-	pw_core_disconnect(data->core);
-	pw_context_destroy(data->context);
-	pw_thread_loop_destroy(data->loop);
+	if(data->registry)
+		pw_proxy_destroy((struct pw_proxy *) data->registry);
+	if(data->core)
+		pw_core_disconnect(data->core);
+	if(data->context)
+		pw_context_destroy(data->context);
+	if(data->loop)
+		pw_thread_loop_destroy(data->loop);
 	free(data);
 }
