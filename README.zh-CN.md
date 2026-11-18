@@ -104,7 +104,7 @@ sudo ninja -C build install
    - **窗口 ▸** `firefox (3) ▸ 窗口标题` → 镜像该 Wayland 原生窗口
    - **显示共享窗口** → 临时显示镜像窗口，本机确认正在共享什么
      （显示时窗口接受鼠标，可用合成器的拖动绑定移动它；隐藏后恢复点击穿透）
-   - **停止共享** → 停止共享但不退出程序
+   - **停止共享** → 停止共享并隐藏镜像窗口，不退出程序
    - **使用系统门户共享…** → 系统选择器（给不支持直接抓屏的合成器兜底）
 3. 在要共享的应用里打开共享对话框，选择 **Wayland Share Bridge** 窗口：
 
@@ -167,8 +167,8 @@ wayland-share-bridge --portal --cursor=hidden
 
 | 菜单项 | 作用 |
 | --- | --- |
-| **停止共享** | 停止共享，程序继续运行。 |
-| **显示/隐藏共享窗口** | 切换镜像窗口的可见性；隐藏时点击穿透，显示时接受鼠标以便拖动。 |
+| **停止共享** | 停止共享并把镜像窗口重新隐藏；程序继续运行。 |
+| **显示/隐藏共享窗口** | 切换镜像窗口的可见性；隐藏时不可见且点击穿透，显示时接受鼠标以便合成器拖动。停止共享时会自动隐藏。 |
 | **屏幕 ▸** | 每个显示器一项，`DP-2 (2560x1440)`；当前源带勾选。 |
 | **窗口 ▸** | 按应用分组：`firefox (3) ▸ 窗口标题`；当前源带勾选。 |
 | **使用系统门户共享…** | 系统选择器（等价 `--reselect`）。 |
@@ -197,7 +197,7 @@ wayland-share-bridge --portal --cursor=hidden
 ```sh
 hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden",
   match = { class = "^wayland-share-bridge$" },
-  opacity = 0.0, float = true, no_blur = true, no_focus = true })'
+  opacity = 0.0, float = true, no_blur = true, no_initial_focus = true, no_focus = true })'
 ```
 
 老版解析器的 Hyprland 上会回退到 `hyprctl keyword windowrulev2 ...`。

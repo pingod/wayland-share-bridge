@@ -6,7 +6,9 @@
 #
 # The bridge itself makes its window click-through (XFixes empty input
 # region) and asks compositors that support _NET_WM_WINDOW_OPACITY to draw
-# it fully transparent.  Hyprland ignores that property for XWayland
+# it fully transparent.  no_focus is a dynamic Hyprland effect: the hit test
+# skips windows that carry it, so the bridge flips it off again while the
+# window is shown (otherwise Super+drag cannot grab the window).  Hyprland ignores that property for XWayland
 # windows, so this launcher installs an equivalent Hyprland rule before the
 # window is mapped (opacity 0, floating, no blur).
 #
@@ -34,7 +36,7 @@ fi
 if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1; then
     # Hyprland 0.4x+ with the Lua config: hyprctl keyword is unavailable,
     # hyprctl eval is the supported interface.
-    if ! hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden", match = { class = "^wayland-share-bridge$" }, opacity = 0.0, float = true, no_blur = true, no_focus = true })' >/dev/null 2>&1; then
+    if ! hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden", match = { class = "^wayland-share-bridge$" }, opacity = 0.0, float = true, no_blur = true, no_initial_focus = true, no_focus = true })' >/dev/null 2>&1; then
         # Legacy hyprland.conf parser.
         rule="windowrulev2"
         hyprctl keyword "$rule" 'opacity 0.0, class:^wayland-share-bridge$' >/dev/null 2>&1 || true

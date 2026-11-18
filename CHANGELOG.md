@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here.
 
+## 1.4.2 - 2026-11-18
+
+- **Show shared window could not be dragged on Hyprland, and the window
+  swallowed clicks even while hidden.**  The Hyprland window rule always
+  carried `no_focus = true`.  That is a *dynamic* effect: Hyprland's hit test
+  skips every window that carries it (`ViewHitTester::windowAt`), and
+  Super+drag (`movewindow`) finds its target through the same hit test.  A
+  shown window could therefore never be grabbed, and the pointer went
+  straight through it.  `no_focus` now follows the visibility (hidden: on,
+  shown: off) and `no_initial_focus` keeps the window from taking the
+  keyboard when it maps.  The 1.4.1 input-region change was not the cause.
+- **The mirror window stayed on screen after sharing stopped.**  The tray
+  **Stop sharing** item, a closed source, a lost PipeWire stream or a lost
+  session bus all left the last frame floating over the desktop with a live
+  input region.  Every path that really ends a stream now hides the window
+  again; a reselect or a failed start does not.
+- A **Show/Hide** or **Stop** click that arrived in the same event-loop tick
+  as the stream ending stayed pending and fired on the next share.  Pending
+  tray requests are now always consumed.
+- The interactive input region follows the frame size: resizing the window
+  used to leave a region sized for the previous frame, so a window that grew
+  could only be grabbed over part of its area.
+- The Hyprland rule string moved to `src/hypr_rule.c` with a unit test that
+  pins both states, because getting `no_focus` wrong is invisible in a build.
+
 ## 1.4.1 - 2026-11-18
 
 - Fix a regression from 1.4.0: the mirror window kept an empty input region

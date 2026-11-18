@@ -15,6 +15,7 @@ hl.window_rule({
     opacity = 0.0,
     float = true,
     no_blur = true,
+    no_initial_focus = true,
     no_focus = true,
 })
 ```
@@ -23,13 +24,20 @@ hl.window_rule({
 - `float = true` keeps it out of tiling and lets the client choose its own
   size (the bridge resizes the window to the captured frame).
 - `no_blur = true` avoids unnecessary GPU work.
-- `no_focus = true` keeps it from stealing keyboard focus if it ever maps
-  before the rule is applied.
+- `no_initial_focus = true` keeps it from stealing keyboard focus when it
+  maps.
+- `no_focus = true` makes the hidden window transparent to the pointer:
+  Hyprland's hit test skips any window carrying this dynamic effect, which is
+  what lets clicks reach the window below.  It must **not** stay enabled while
+  the window is shown - the same hit test is what Super+drag uses to find the
+  window under the cursor, so a shown window with `no_focus` can never be
+  grabbed.  The bridge re-evaluates the rule with `no_focus = false` when it
+  shows the window.
 
 The launcher `wayland-share-bridge-launch` runs the equivalent of
 
 ```sh
-hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden", match = { class = "^wayland-share-bridge$" }, opacity = 0.0, float = true, no_blur = true, no_focus = true })'
+hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden", match = { class = "^wayland-share-bridge$" }, opacity = 0.0, float = true, no_blur = true, no_initial_focus = true, no_focus = true })'
 ```
 
 before starting the bridge (it discovers `HYPRLAND_INSTANCE_SIGNATURE` from

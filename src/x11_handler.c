@@ -93,19 +93,31 @@ static void set_window_state(Display *dpy, Window win) {
  * that is not under the pointer - Hyprland's Super+drag hits whatever surface
  * accepts input at the cursor, so a click-through window cannot be dragged.
  */
-static void set_input_region(Display *dpy, Window win, int interactive) {
-	XWindowAttributes attr;
+static void set_input_region(Display *dpy, Window win, int interactive,
+			     unsigned int width, unsigned int height) {
 	XserverRegion region;
 
 	if(interactive) {
 		XRectangle rect;
 
-		if(!XGetWindowAttributes(dpy, win, &attr))
-			return;
+		/*
+		 * Use the size the caller knows about, not XGetWindowAttributes():
+		 * a resize issues XConfigureWindow and the server has not applied
+		 * it yet, so the attributes still report the previous size and the
+		 * input region would stay too small to grab the window.
+		 */
+		if(width == 0 || height == 0) {
+			XWindowAttributes attr;
+
+			if(!XGetWindowAttributes(dpy, win, &attr))
+				return;
+			width = (unsigned int) attr.width;
+			height = (unsigned int) attr.height;
+		}
 		rect.x = 0;
 		rect.y = 0;
-		rect.width = (unsigned short) attr.width;
-		rect.height = (unsigned short) attr.height;
+		rect.width = (unsigned short) width;
+		rect.height = (unsigned short) height;
 		region = XFixesCreateRegion(dpy, &rect, 1);
 	} else {
 		region = XFixesCreateRegion(dpy, NULL, 0);
@@ -284,7 +296,7 @@ struct xdata *xhandler_init(const struct options *opts) {
 	 */
 	/* Hidden by default: empty input region so clicks go through.  With
 	 * --show the window is visible and has to be draggable. */
-	set_input_region(data->display, data->window, opts->show);
+	set_input_region(data->display, data->window, opts->show, 0, 0);
 
 	if(!opts->show)
 		set_cardinal(data->display, data->window, "_NET_WM_WINDOW_OPACITY", 0);
@@ -328,7 +340,7 @@ void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height
 	XConfigureWindow(data->display, data->window, CWWidth | CWHeight, &changes);
 	/* Keep the (interactive) input region in sync with the new size. */
 	if(data->visible)
-		set_input_region(data->display, data->window, 1);
+		set_input_region(data->display, data->window, 1, data->width, data->height);
 	XFlush(data->display);
 }
 
@@ -412,7 +424,7 @@ void xhandler_set_visible(struct xdata *data, int visible) {
 		     visible ? 0xffffffffUL : 0);
 	/* Shown windows accept the pointer so the compositor can drag them;
 	 * hidden ones stay click-through. */
-	set_input_region(data->display, data->window, visible);
+	set_input_region(data->display, data->window, visible, data->width, data->height);
 	if(visible)
 		XRaiseWindow(data->display, data->window);
 	data->visible = visible;

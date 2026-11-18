@@ -26,6 +26,7 @@
 
 #include "config.h"
 #include "dbus_handler.h"
+#include "hypr_rule.h"
 #include "i18n.h"
 #include "pipewire_handler.h"
 #include "source_spec.h"
@@ -145,11 +146,10 @@ static void hyprland_set_visibility(int visible) {
 	if(!getenv("HYPRLAND_INSTANCE_SIGNATURE"))
 		return;
 
-	snprintf(rule, sizeof(rule),
-		 "hl.window_rule({ name = \"wayland-share-bridge-hidden\", "
-		 "match = { class = \"^wayland-share-bridge$\" }, opacity = %s, "
-		 "float = true, no_blur = true, no_focus = true })",
-		 visible ? "1.0" : "0.0");
+	if(hypr_visibility_rule(rule, sizeof(rule), visible) != 0) {
+		fprintf(stderr, "warning: the Hyprland window rule does not fit\n");
+		return;
+	}
 
 	eval_argv[0] = "hyprctl";
 	eval_argv[1] = "eval";
@@ -193,6 +193,20 @@ static void set_window_visibility(int visible) {
 	hyprland_set_visibility(g_visible);
 	if(g_tray)
 		thandler_set_state(g_tray, g_sharing, g_visible, g_share_kind, g_share_label);
+}
+
+/*
+ * The mirror window keeps the last frame of a stream that just went away.
+ * Leaving it on screen would keep a dead picture floating over the desktop
+ * with a live input region, so every path that really ends a stream hides it.
+ *
+ * Only a stream that was running counts: a failed start (nothing was ever
+ * captured) or a reselect (the next stream starts immediately) must not hide
+ * a window the user asked for with --show or the tray toggle.
+ */
+static void hide_mirror_after_stream(void) {
+	if(g_sharing && g_visible)
+		set_window_visibility(0);
 }
 
 static void update_tray_state(void) {
@@ -371,8 +385,10 @@ static int start_direct(const char *spec) {
 	if(wlcap_start(&req, g_xdata) != 0) {
 		/* The old session is only kept when the request could not be
 		 * resolved; otherwise nothing is captured any more. */
-		if(!wlcap_active())
+		if(!wlcap_active()) {
+			hide_mirror_after_stream();
 			clear_sharing_state();
+		}
 		set_idle_status(NULL);
 		fprintf(stderr, "Cannot share that source; pick another one from the tray menu.\n");
 		return -1;
@@ -460,6 +476,7 @@ static void stop_sharing(struct ddata **ddata_ptr, struct pdata **pdata_ptr,
 	*direct_active = 0;
 	g_direct_stalled = 0;
 	g_last_spec[0] = '\0';
+	hide_mirror_after_stream();
 	clear_sharing_state();
 	set_idle_status(NULL);
 	fprintf(stderr, "Sharing stopped.\n");
@@ -840,14 +857,26 @@ int main(int argc, char *argv[]) {
 		tick(NULL);
 		reap_children();
 
-		if(g_tray && g_sharing && thandler_take_stop(g_tray))
-			stop_sharing(&ddata, &pdata, &active, &direct_active);
-		if(g_tray && g_sharing && thandler_take_visibility(g_tray))
-			set_window_visibility(!g_visible);
+		if(g_tray) {
+			/*
+			 * Both items are disabled while nothing is shared, but a click
+			 * that lands in the same tick as the stream ending must still be
+			 * consumed: a pending request would otherwise fire on the next
+			 * share and stop it or flip the window.
+			 */
+			int stop = thandler_take_stop(g_tray);
+			int toggle = thandler_take_visibility(g_tray);
+
+			if(stop && g_sharing)
+				stop_sharing(&ddata, &pdata, &active, &direct_active);
+			if(toggle && g_sharing)
+				set_window_visibility(!g_visible);
+		}
 
 		if(g_direct && wlcap_dispatch() != 0) {
 			fprintf(stderr, "capture: lost the Wayland connection\n");
 			wlcap_destroy();
+			hide_mirror_after_stream();
 			clear_sharing_state();
 			direct_active = 0;
 			g_direct = 0;
@@ -886,6 +915,7 @@ int main(int argc, char *argv[]) {
 			wlcap_stop();
 			direct_active = 0;
 			g_direct_stalled = 0;
+			hide_mirror_after_stream();
 			clear_sharing_state();
 			set_idle_status(tr("The source was closed; pick another one",
 				   "共享源已关闭，请重新选择"));
@@ -942,6 +972,7 @@ int main(int argc, char *argv[]) {
 				dhandler_destroy(ddata);
 				ddata = NULL;
 				active = 0;
+				hide_mirror_after_stream();
 				clear_sharing_state();
 				set_idle_status("Lost the session bus; the portal is unavailable");
 			}
@@ -954,6 +985,7 @@ int main(int argc, char *argv[]) {
 			if(ddata)
 				dhandler_close_session(ddata);
 			active = 0;
+			hide_mirror_after_stream();
 			clear_sharing_state();
 			set_idle_status("The stream was closed; pick another one");
 		}

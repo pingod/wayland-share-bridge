@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "hypr_rule.h"
 #include "image_convert.h"
 #include "source_spec.h"
 #include "state_file.h"
@@ -149,6 +150,34 @@ static int pixel_is(const unsigned char *dst, unsigned int width, unsigned int x
 	const unsigned char *p = dst + ((size_t) y * width + x) * 4;
 
 	return p[0] == red && p[1] == 0x10 && p[2] == 0x20;
+}
+
+/*
+ * The Hyprland rule is the only thing that decides whether the mirror window
+ * can be dragged, and getting it wrong is invisible in a build: no_focus is a
+ * dynamic effect that removes the window from Hyprland's hit test, so a shown
+ * window carrying it can never be grabbed by Super+drag.  Both states are
+ * pinned here.
+ */
+static void test_hypr_visibility_rule(void) {
+	char rule[640];
+
+	CHECK(hypr_visibility_rule(rule, sizeof(rule), 0) == 0, "hidden rule fits");
+	CHECK(strstr(rule, "opacity = 0.0") != NULL, "hidden rule is transparent: %s", rule);
+	CHECK(strstr(rule, "no_focus = true") != NULL, "hidden rule skips the hit test: %s", rule);
+	CHECK(strstr(rule, "no_initial_focus = true") != NULL, "rule never steals focus: %s", rule);
+	CHECK(strstr(rule, "float = true") != NULL, "rule keeps the client size: %s", rule);
+
+	CHECK(hypr_visibility_rule(rule, sizeof(rule), 1) == 0, "shown rule fits");
+	CHECK(strstr(rule, "opacity = 1.0") != NULL, "shown rule is opaque: %s", rule);
+	CHECK(strstr(rule, "no_focus = false") != NULL,
+	      "shown rule must stay grabbable by Super+drag: %s", rule);
+	CHECK(strstr(rule, "no_focus = true") == NULL,
+	      "shown rule must not carry no_focus: %s", rule);
+	CHECK(strstr(rule, "float = true") != NULL, "shown rule keeps floating: %s", rule);
+
+	CHECK(hypr_visibility_rule(rule, 16, 1) == -1, "too small a buffer is rejected");
+	CHECK(hypr_visibility_rule(NULL, 64, 1) == -1, "no buffer is rejected");
 }
 
 static void test_image_convert(void) {
@@ -302,6 +331,7 @@ int main(void) {
 	test_utf8_valid();
 	test_ellipsize();
 	test_source_spec();
+	test_hypr_visibility_rule();
 	test_image_convert();
 	test_state_file();
 

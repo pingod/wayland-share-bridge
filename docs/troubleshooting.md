@@ -80,7 +80,7 @@ installed, or add it manually:
 ```sh
 hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden",
   match = { class = "^wayland-share-bridge$" },
-  opacity = 0.0, float = true, no_blur = true, no_focus = true })'
+  opacity = 0.0, float = true, no_blur = true, no_initial_focus = true, no_focus = true })'
 ```
 
 See [hyprland.md](hyprland.md).

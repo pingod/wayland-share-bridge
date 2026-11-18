@@ -124,7 +124,8 @@ This installs:
      accepts the pointer, so you can move it with your compositor's usual
      mouse binding (e.g. Super+left drag).  **Hide** makes it click-through
      again
-   - **Stop sharing** — stop mirroring without quitting the bridge
+   - **Stop sharing** — stop mirroring and hide the window, without quitting
+     the bridge
    - **Share via system portal...** — the portal picker, for compositors without
      direct capture
 3. In the application you want to share from, open its screen-share dialog and
@@ -190,8 +191,8 @@ wayland-share-bridge --search firefox   # filter the running instance's Windows 
 
 | Entry | Action |
 | --- | --- |
-| **Stop sharing** | Stop mirroring; the bridge keeps running. |
-| **Show/Hide shared window** | Toggle the mirror window between visible and hidden. Hidden it is click-through; shown it accepts the pointer so it can be dragged (Super+drag in Hyprland). |
+| **Stop sharing** | Stop mirroring and hide the window again; the bridge keeps running. |
+| **Show/Hide shared window** | Toggle the mirror window between visible and hidden. Hidden it is invisible and click-through; shown it accepts the pointer so the compositor can drag it (Super+drag in Hyprland). It hides itself again when sharing stops. |
 | **Screens ▸** | Submenu with one `Screen: NAME (WxH)` entry per monitor. |
 | **Windows ▸** | Submenu grouped by application: `firefox (3) ▸ window title`. |
 | **Share via system portal...** | Portal picker (same as `--reselect`). |
@@ -227,7 +228,7 @@ property, so the installed launcher
 ```sh
 hyprctl eval 'hl.window_rule({ name = "wayland-share-bridge-hidden",
   match = { class = "^wayland-share-bridge$" },
-  opacity = 0.0, float = true, no_blur = true, no_focus = true })'
+  opacity = 0.0, float = true, no_blur = true, no_initial_focus = true, no_focus = true })'
 ```
 
 It falls back to `hyprctl keyword windowrulev2 ...` on Hyprland versions with

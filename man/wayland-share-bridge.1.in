@@ -43,7 +43,8 @@ The bridge window is invisible while it waits (via
 or a compositor window rule) and click-through (empty XFixes input region).
 A window shown with
 .B \-\-show
-or the tray entry accepts the pointer so it can be dragged.
+or the tray entry accepts the pointer so it can be dragged, and hides itself
+again when sharing stops.
 The installed launcher
 .B wayland-share-bridge-launch
 adds the Hyprland rule that hides the window.
@@ -122,10 +123,12 @@ Show the version.
 The tray icon offers a categorised menu:
 .TP
 .B Stop sharing
-Stop mirroring; the bridge keeps running.
+Stop mirroring and hide the window again; the bridge keeps running.
 .TP
 .B Show/Hide shared window
-Toggle the visibility of the mirror window on your own screen.
+Toggle the visibility of the mirror window on your own screen.  Hidden it is
+invisible and click-through, shown it accepts the pointer so the compositor
+can drag it.  The window hides itself again when sharing stops.
 .TP
 .B Screens
 Submenu with one entry per monitor; the active source carries a checkmark.
