@@ -45,10 +45,16 @@
 #define ITEM_SCREENS 7
 #define ITEM_WINDOWS 8
 #define ITEM_CLEAR_SEARCH 9
+#define ITEM_QUALITY 10
+#define ITEM_FPS 11
+#define ITEM_SEPARATOR_C 12
 #define ITEM_NO_SCREENS 999998
 #define ITEM_NO_WINDOWS 999999
 /* Per-application submenu ids. */
 #define ITEM_APP_ID_BASE 0x30000000
+/* Quality and frame rate presets. */
+#define ITEM_QUALITY_ID_BASE 0x40000000
+#define ITEM_FPS_ID_BASE 0x50000000
 /* Ids of selectable sources are derived from a hash of the source id instead
  * of the position in the (frequently reordered) list, so a click from a
  * slightly stale menu still resolves to the same source. */
@@ -78,6 +84,14 @@ struct tray {
 	int visible;
 	enum source_kind active_kind;
 	char active_id[192];
+
+	/* Quality preset and frame rate shown by the menu (check marks). */
+	int quality;
+	int fps;
+	int quality_pending;
+	int pending_quality;
+	int fps_pending;
+	int pending_fps;
 
 	int (*source_provider)(enum source_kind kind, struct capture_source **list);
 	struct capture_source *screens;
@@ -402,6 +416,66 @@ static void append_windows_menu(DBusMessageIter *children, struct tray *tray) {
 		append_menu_item_ex(children, ITEM_NO_WINDOWS, tr("No window found", "未找到窗口"), 0, 0, 0);
 }
 
+static const int quality_values[] = {
+	QUALITY_SOURCE, QUALITY_1080P, QUALITY_720P, QUALITY_480P
+};
+static const int fps_values[] = { 60, 30, 15, 5 };
+
+static const char *quality_text(int quality) {
+	switch(quality) {
+	case QUALITY_1080P:
+		return "1080p";
+	case QUALITY_720P:
+		return "720p";
+	case QUALITY_480P:
+		return "480p";
+	default:
+		return tr("Source (sharpest)", "原始（最清晰）");
+	}
+}
+
+static int32_t quality_menu_id(int quality) {
+	return ITEM_QUALITY_ID_BASE + quality;
+}
+
+static int32_t fps_menu_id(int fps) {
+	return ITEM_FPS_ID_BASE + fps;
+}
+
+static int is_fps_preset(int fps) {
+	size_t i;
+
+	for(i = 0; i < sizeof(fps_values) / sizeof(fps_values[0]); i++) {
+		if(fps_values[i] == fps)
+			return 1;
+	}
+	return 0;
+}
+
+static void append_quality_menu(DBusMessageIter *children, struct tray *tray) {
+	size_t i;
+
+	for(i = 0; i < sizeof(quality_values) / sizeof(quality_values[0]); i++) {
+		int quality = quality_values[i];
+
+		append_menu_item_checked(children, quality_menu_id(quality),
+					 quality_text(quality), 1,
+					 tray->quality == quality);
+	}
+}
+
+static void append_fps_menu(DBusMessageIter *children, struct tray *tray) {
+	size_t i;
+
+	for(i = 0; i < sizeof(fps_values) / sizeof(fps_values[0]); i++) {
+		char label[32];
+
+		snprintf(label, sizeof(label), "%d fps", fps_values[i]);
+		append_menu_item_checked(children, fps_menu_id(fps_values[i]),
+					 label, 1, tray->fps == fps_values[i]);
+	}
+}
+
 static void append_root_items(DBusMessageIter *children, struct tray *tray) {
 	const char *toggle = tray->visible ?
 		tr("Hide shared window", "隐藏共享窗口") :
@@ -413,6 +487,9 @@ static void append_root_items(DBusMessageIter *children, struct tray *tray) {
 	append_menu_item_ex(children, ITEM_SEPARATOR, NULL, 1, 0, 0);
 	append_menu_item_variant(children, tray, ITEM_SCREENS);
 	append_menu_item_variant(children, tray, ITEM_WINDOWS);
+	append_menu_item_ex(children, ITEM_SEPARATOR_C, NULL, 1, 0, 0);
+	append_menu_item_variant(children, tray, ITEM_QUALITY);
+	append_menu_item_variant(children, tray, ITEM_FPS);
 	append_menu_item_ex(children, ITEM_SEPARATOR_B, NULL, 1, 0, 0);
 	append_menu_item_ex(children, ITEM_PORTAL, tr("Share via system portal…", "使用系统门户共享…"), 0, 0, 1);
 	append_menu_item_ex(children, ITEM_QUIT, tr("Quit", "退出"), 0, 0, 1);
@@ -453,6 +530,19 @@ static void append_item_struct(DBusMessageIter *iter, struct tray *tray, int32_t
 				       windows ? tray->window_count > 0 : tray->screen_count > 0);
 		append_dict_entry_bool(&props, "visible", 1);
 		append_dict_entry_string(&props, "children-display", "submenu");
+	} else if(id == ITEM_QUALITY || id == ITEM_FPS) {
+		char label[96];
+
+		if(id == ITEM_QUALITY)
+			snprintf(label, sizeof(label), tr("Quality: %s", "画质: %s"),
+				 quality_text(tray->quality));
+		else
+			snprintf(label, sizeof(label), tr("Frame rate: %d fps", "帧率: %d fps"),
+				 tray->fps);
+		append_dict_entry_string(&props, "label", label);
+		append_dict_entry_bool(&props, "enabled", 1);
+		append_dict_entry_bool(&props, "visible", 1);
+		append_dict_entry_string(&props, "children-display", "submenu");
 	} else if(group) {
 		char name[128];
 		char label[160];
@@ -475,6 +565,10 @@ static void append_item_struct(DBusMessageIter *iter, struct tray *tray, int32_t
 		append_screens(&children, tray);
 	else if(id == ITEM_WINDOWS)
 		append_windows_menu(&children, tray);
+	else if(id == ITEM_QUALITY)
+		append_quality_menu(&children, tray);
+	else if(id == ITEM_FPS)
+		append_fps_menu(&children, tray);
 	else if(group)
 		append_group_windows(&children, tray, group);
 	dbus_message_iter_close_container(&item, &children);
@@ -749,6 +843,25 @@ static void handle_menu_event(struct tray *tray, int32_t id) {
 		return;
 	}
 
+	if(id >= ITEM_QUALITY_ID_BASE && id < ITEM_QUALITY_ID_BASE + ITEM_ID_RANGE) {
+		int quality = id - ITEM_QUALITY_ID_BASE;
+
+		if(quality >= 0 && quality < QUALITY_COUNT) {
+			tray->quality_pending = 1;
+			tray->pending_quality = quality;
+		}
+		return;
+	}
+	if(id >= ITEM_FPS_ID_BASE && id < ITEM_FPS_ID_BASE + ITEM_ID_RANGE) {
+		int fps = id - ITEM_FPS_ID_BASE;
+
+		if(is_fps_preset(fps)) {
+			tray->fps_pending = 1;
+			tray->pending_fps = fps;
+		}
+		return;
+	}
+
 	switch(id) {
 	case ITEM_STOP:
 		tray->stop_pending = 1;
@@ -781,6 +894,7 @@ static void append_group_property(DBusMessageIter *array, struct tray *tray, int
 	char label[240];
 	char raw[260];
 	int known = 1, enabled = 1, separator = 0, submenu_entry = 0;
+	int toggle_checked = -1;
 	enum source_kind kind = SOURCE_KIND_ANY;
 	const char *source_id = NULL;
 
@@ -794,12 +908,39 @@ static void append_group_property(DBusMessageIter *array, struct tray *tray, int
 			 tray->visible ? tr("Hide shared window", "隐藏共享窗口") :
 					 tr("Show shared window", "显示共享窗口"));
 		enabled = tray->sharing;
+	} else if(id == ITEM_QUALITY) {
+		snprintf(label, sizeof(label), tr("Quality: %s", "画质: %s"),
+			 quality_text(tray->quality));
+		submenu_entry = 1;
+	} else if(id == ITEM_FPS) {
+		snprintf(label, sizeof(label), tr("Frame rate: %d fps", "帧率: %d fps"),
+			 tray->fps);
+		submenu_entry = 1;
+	} else if(id >= ITEM_QUALITY_ID_BASE && id < ITEM_QUALITY_ID_BASE + ITEM_ID_RANGE) {
+		int quality = id - ITEM_QUALITY_ID_BASE;
+
+		if(quality < 0 || quality >= QUALITY_COUNT) {
+			known = 0;
+		} else {
+			snprintf(label, sizeof(label), "%s", quality_text(quality));
+			toggle_checked = quality == tray->quality;
+		}
+	} else if(id >= ITEM_FPS_ID_BASE && id < ITEM_FPS_ID_BASE + ITEM_ID_RANGE) {
+		int fps = id - ITEM_FPS_ID_BASE;
+
+		if(!is_fps_preset(fps)) {
+			known = 0;
+		} else {
+			snprintf(label, sizeof(label), "%d fps", fps);
+			toggle_checked = fps == tray->fps;
+		}
 	} else if(id == ITEM_PORTAL) {
 		snprintf(label, sizeof(label), "%s",
 			 tr("Share via system portal…", "使用系统门户共享…"));
 	} else if(id == ITEM_QUIT) {
 		snprintf(label, sizeof(label), "%s", tr("Quit", "退出"));
-	} else if(id == ITEM_SEPARATOR || id == ITEM_SEPARATOR_B) {
+	} else if(id == ITEM_SEPARATOR || id == ITEM_SEPARATOR_B ||
+		  id == ITEM_SEPARATOR_C) {
 		separator = 1;
 	} else if(id == ITEM_CLEAR_SEARCH) {
 		char query[96];
@@ -882,6 +1023,9 @@ static void append_group_property(DBusMessageIter *array, struct tray *tray, int
 			append_dict_entry_string(&props, "toggle-type", "checkmark");
 			append_dict_entry_int(&props, "toggle-state",
 					      is_active_source(tray, kind, source_id));
+		} else if(toggle_checked >= 0) {
+			append_dict_entry_string(&props, "toggle-type", "checkmark");
+			append_dict_entry_int(&props, "toggle-state", toggle_checked);
 		}
 	}
 	dbus_message_iter_close_container(&entry, &props);
@@ -914,7 +1058,8 @@ static size_t collect_group_ids(struct tray *tray, DBusMessage *msg,
 	{
 		static const int32_t fixed[] = {
 			ITEM_STOP, ITEM_VISIBLE, ITEM_SEPARATOR, ITEM_SCREENS,
-			ITEM_WINDOWS, ITEM_SEPARATOR_B, ITEM_PORTAL, ITEM_QUIT
+			ITEM_WINDOWS, ITEM_SEPARATOR_C, ITEM_QUALITY, ITEM_FPS,
+			ITEM_SEPARATOR_B, ITEM_PORTAL, ITEM_QUIT
 		};
 		size_t i;
 		int have_group = 0;
@@ -922,6 +1067,11 @@ static size_t collect_group_ids(struct tray *tray, DBusMessage *msg,
 
 		for(i = 0; i < sizeof(fixed) / sizeof(fixed[0]) && count < max; i++)
 			ids[count++] = fixed[i];
+
+		for(i = 0; i < sizeof(quality_values) / sizeof(quality_values[0]) && count < max; i++)
+			ids[count++] = quality_menu_id(quality_values[i]);
+		for(i = 0; i < sizeof(fps_values) / sizeof(fps_values[0]) && count < max; i++)
+			ids[count++] = fps_menu_id(fps_values[i]);
 
 		for(i = 0; i < (size_t) tray->screen_count && count < max; i++)
 			ids[count++] = source_menu_id(SOURCE_KIND_SCREEN, tray->screens[i].id);
@@ -1411,6 +1561,35 @@ int thandler_take_visibility(struct tray *tray) {
 		return 0;
 
 	tray->visibility_pending = 0;
+	return 1;
+}
+
+void thandler_set_quality(struct tray *tray, int quality, int fps) {
+	if(!tray)
+		return;
+
+	tray->quality = quality;
+	tray->fps = fps;
+	emit_layout_updated(tray, 0);
+}
+
+int thandler_take_quality(struct tray *tray, int *quality) {
+	if(!tray || !tray->quality_pending)
+		return 0;
+
+	tray->quality_pending = 0;
+	if(quality)
+		*quality = tray->pending_quality;
+	return 1;
+}
+
+int thandler_take_fps(struct tray *tray, int *fps) {
+	if(!tray || !tray->fps_pending)
+		return 0;
+
+	tray->fps_pending = 0;
+	if(fps)
+		*fps = tray->pending_fps;
 	return 1;
 }
 

@@ -38,11 +38,33 @@ struct source_info {
 	int x, y, width, height;
 };
 
+/*
+ * How the mirror is scaled before it reaches the X11 window.  Screen sharing
+ * applications expose the output resolution rather than the capture
+ * resolution: QUALITY_SOURCE copies the source 1:1, the other presets cap the
+ * mirror to fit 1080p/720p/480p (aspect ratio preserved, never upscaled).
+ * Capping is the mainstream answer to a receiver that has to spend a fixed
+ * bitrate on whatever window it was given.
+ */
+enum capture_quality {
+	QUALITY_SOURCE = 0,
+	QUALITY_1080P,
+	QUALITY_720P,
+	QUALITY_480P,
+	QUALITY_COUNT,
+};
+
+#define FPS_MIN 5
+#define FPS_MAX 60
+#define FPS_DEFAULT 30
+
 struct options {
 	const char *title;
 	const char *class_name;
 	enum cursor_mode cursor;
 	enum source_kind source_kind;
+	enum capture_quality quality;
+	int fps;
 	int remember;
 	int show;
 	int tray;

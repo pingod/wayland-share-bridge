@@ -64,6 +64,19 @@ Direct capture paints the cursor for monitor sources.
 Fallback source kind for the portal backend: \fBauto\fR (default, remembers the
 last choice), \fBany\fR, \fBscreen\fR or \fBwindow\fR.
 .TP
+.BR \-q ", " \-\-quality= PRESET
+Cap the mirror resolution: \fBsource\fR (default, 1:1 and lossless),
+\fB1080p\fR, \fB720p\fR or \fB480p\fR.  The aspect ratio is preserved and a
+smaller source is never upscaled.  Downscaling uses a box filter, so text
+stays readable; the lower presets cost less CPU and give the receiving
+application less data to encode.  The pick is remembered in the state file
+when \fB\-\-remember\fR is active.
+.TP
+.BR \-F ", " \-\-fps= RATE
+Frame rate the direct capture backend asks the compositor for, 5 to 60
+(default 30).  Higher rates make scrolling and video smoother; lower rates
+save CPU and bandwidth.
+.TP
 .BR \-S ", " \-\-source= SPEC
 Capture SPEC immediately:
 .BI screen: NAME
@@ -140,6 +153,16 @@ Submenu grouped by application; each application has one entry per window, and
 the active source carries a checkmark.  A
 .B Search: QUERY (clear)
 entry appears first while \fB\-\-search\fR is active.
+.TP
+.B Quality
+Submenu with the resolution caps: \fBSource (sharpest)\fR, \fB1080p\fR,
+\fB720p\fR and \fB480p\fR; the active preset carries a checkmark.  At
+\fBSource (sharpest)\fR the mirror is pixel-identical to the shared content,
+so any blur left in a meeting comes from that application's encoder.
+.TP
+.B Frame rate
+Submenu with 60, 30, 15 and 5 fps for direct capture; the active rate
+carries a checkmark.
 .TP
 .B Share via system portal...
 Runs the portal picker (same as \fB\-\-reselect\fR).
@@ -233,6 +256,10 @@ Share one window, run headless (no tray).
 .TP
 .B wayland-share-bridge --portal --cursor=hidden
 Use the portal picker with the cursor hidden.
+.TP
+.B wayland-share-bridge --quality=720p --fps=60
+Mirror at 720p and 60 frames per second: smoother motion, less CPU than a
+full-resolution mirror.
 .SH SEE ALSO
 .BR systemd.exec (5),
 .BR xdg-desktop-portal (1),

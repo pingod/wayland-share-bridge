@@ -61,7 +61,7 @@ When a portal session is active, `--reselect` asks the portal for a new source
 (one click in the tray menu: **Share via system portal...**).  Source picks made through
 direct capture are stored in `$XDG_STATE_HOME/wayland-share-bridge/state`
 (`source=screen:DP-2`, `source=window:firefox|Title`) and restored at the next
-start.
+start.  The quality preset and frame rate are remembered the same way.
 
 ## Requirements
 
@@ -159,6 +159,10 @@ Options:
   -k, --source-kind=KIND
                         fallback source kind for the portal backend
                         (auto, any, screen, window; default: auto)
+  -q, --quality=PRESET  cap the mirror resolution: source (1:1, default),
+                        1080p, 720p or 480p (aspect ratio preserved,
+                        never upscaled; smaller costs less bandwidth)
+  -F, --fps=RATE        direct capture frame rate, 5..60 (default: 30)
   -S, --source=SPEC     capture SPEC right away: screen:NAME,
                         window:APP_ID, window:APP_ID|TITLE, or
                         region:NAME,X,Y,W,H (direct capture only);
@@ -186,6 +190,7 @@ wayland-share-bridge --list-sources
 wayland-share-bridge --source=screen:DP-2
 wayland-share-bridge --source='window:firefox|DeepSeek' --no-tray
 wayland-share-bridge --portal --cursor=hidden
+wayland-share-bridge --quality=720p --fps=60   # lighter stream, smoother motion
 wayland-share-bridge --search firefox   # filter the running instance's Windows menu
 ```
 
@@ -197,6 +202,8 @@ wayland-share-bridge --search firefox   # filter the running instance's Windows 
 | **Show/Hide shared window** | Toggle the mirror window between visible and hidden. Hidden it is invisible and click-through; shown it accepts the pointer so the compositor can drag it (Super+drag in Hyprland). It leaves the desktop again when sharing stops. |
 | **Screens ▸** | Submenu with one `Screen: NAME (WxH)` entry per monitor. |
 | **Windows ▸** | Submenu grouped by application: `firefox (3) ▸ window title`. |
+| **Quality ▸** | Mirror resolution cap: **Source (sharpest)** mirrors at 1:1, `1080p`/`720p`/`480p` downscale (box filter, aspect preserved). Lower presets cost less CPU and give the receiving application less data to encode. |
+| **Frame rate ▸** | Direct capture rate: 60, 30, 15 or 5 fps. 60 makes scrolling and video smoother; 30 is the default. |
 | **Share via system portal...** | Portal picker (same as `--reselect`). |
 | **Quit** | Stop the bridge. |
 | Header row (`Wayland Share Bridge vVERSION`) | The tray host renders the SNI tooltip title here; the version is part of it. |
@@ -219,6 +226,20 @@ While a filter is active, the first entry of **Windows ▸** reads
 case-insensitive substring over the app id, window title and identifier.
 Long titles are ellipsized and applications are grouped into submenus, so
 menu entries stay short enough for narrow tray popups.
+
+### Sharpness and bandwidth
+
+With **Source (sharpest)** the mirror is pixel-identical to the shared
+content: the bridge copies frames losslessly, so it adds no blur of its own.
+What still looks soft in a meeting is decided downstream, by that
+application's own encoder and video-quality setting - check there first.
+
+The other presets exist for the opposite direction: they cap the mirror
+resolution (`1080p` = 1920x1080, `720p` = 1280x720, `480p` = 854x480) with a
+box filter so the downscale stays readable, and **Frame rate ▸** caps how
+often frames are captured.  Lower values cost less CPU, less X11 traffic and
+give the receiving application less data to encode - useful on a weak machine
+or a slow link.
 
 ## Making the bridge window invisible
 

@@ -33,6 +33,7 @@
 #define MFD_CLOEXEC 0x0001U
 #endif
 
+/* Default frame interval (30 fps) until --fps / the tray picks another. */
 #define FRAME_INTERVAL_MS 33
 /* How long a frame may stay pending before it is considered stuck. */
 #define FRAME_TIMEOUT_MS 2000
@@ -86,7 +87,19 @@ static struct {
 	int failed;
 	uint32_t last_frame_ms;
 	uint32_t frame_request_ms;
+	uint32_t frame_interval_ms;
 	int stalled;
+	/*
+	 * A frame failed because the source was resized.  The compositor
+	 * follows that with fresh buffer constraints; until they arrive the
+	 * old buffer must not be reused.
+	 */
+	int realloc_pending;
+	uint32_t constraints_wait_ms;
+	/* The next frame fills a freshly allocated buffer and must be shown
+	 * in full, whatever damage the compositor reports. */
+	int need_full_present;
+	int failures;
 
 	struct source_request request;
 	int crop_x;
@@ -107,6 +120,7 @@ static struct {
 	char own_title[192];
 } cap = {
 	.format = WL_SHM_FORMAT_XRGB8888,
+	.frame_interval_ms = FRAME_INTERVAL_MS,
 };
 
 static uint32_t now_ms(void) {
@@ -374,24 +388,40 @@ static void frame_ready(void *data, struct ext_image_copy_capture_frame_v1 *fram
 
 	(void) data;
 	if(cap.xdata && cap.data) {
-		if(cap.xdata->width != dst_w || cap.xdata->height != dst_h)
+		int force, scaled;
+
+		/* src_* is the size asked for, which is not the mirror size once a
+		 * quality preset caps it. */
+		if(cap.xdata->src_width != dst_w || cap.xdata->src_height != dst_h)
 			xhandler_resize(cap.xdata, dst_w, dst_h, cap.swap_rb);
 
-		/* Without damage the compositor copies the previous content again;
-		 * pushing it to the X server would be pure work. */
-		if(cap.frame_damage || !cap.damage_seen) {
+		force = cap.need_full_present || xhandler_repaint_pending(cap.xdata);
+		scaled = xhandler_scaled(cap.xdata);
+
+		/*
+		 * Without damage the compositor copies the previous content again;
+		 * pushing it to the X server would be pure work.  A freshly
+		 * allocated buffer is different: the part the compositor does not
+		 * damage was never shown, and after a resize that is most of the
+		 * window, so the first frame into it is always presented in full.
+		 * A scaled mirror cannot map damage rectangles either.
+		 */
+		if(force || cap.frame_damage || !cap.damage_seen) {
 			if(xhandler_upload(cap.xdata, cap.data, (uint32_t) cap.data_size,
 					   cap.width * 4, cap.crop_x, cap.crop_y,
 					   cap.crop_w, cap.crop_h, cap.transform) == 0) {
-				if(cap.transform == 0 && cap.damage_seen && cap.frame_damage) {
+				if(cap.transform == 0 && !force &&
+				   !scaled && cap.damage_seen && cap.frame_damage) {
 					xhandler_present(cap.xdata,
 							 cap.damage_x - cap.crop_x,
 							 cap.damage_y - cap.crop_y,
 							 (unsigned int) cap.damage_w,
 							 (unsigned int) cap.damage_h);
 				} else {
-					xhandler_present(cap.xdata, 0, 0, dst_w, dst_h);
+					xhandler_present(cap.xdata, 0, 0,
+							 cap.xdata->width, cap.xdata->height);
 				}
+				cap.need_full_present = 0;
 			}
 		}
 		if(cap.frame_damage)
@@ -399,19 +429,45 @@ static void frame_ready(void *data, struct ext_image_copy_capture_frame_v1 *fram
 	}
 	cap.frame_pending = 0;
 	cap.stalled = 0;
+	cap.failures = 0;
 	cap.last_frame_ms = now_ms();
 	ext_image_copy_capture_frame_v1_destroy(frame);
 	cap.frame = NULL;
 }
 
+/*
+ * Not every failure ends the stream.  A window that is resized while a frame
+ * is in flight makes the compositor fail that frame with buffer_constraints,
+ * followed by fresh constraints (buffer_size + done) for the new size; the
+ * session stays alive and the next frame must simply use a new buffer.
+ * Latching cap.failed here stopped the whole capture, left the sharing app
+ * with a black picture and made the bridge hide its mirror window.
+ */
 static void frame_failed(void *data, struct ext_image_copy_capture_frame_v1 *frame,
 			 uint32_t reason) {
 	(void) data;
-	fprintf(stderr, "capture: frame failed (reason %u)\n", reason);
 	cap.frame_pending = 0;
-	cap.failed = 1;
 	ext_image_copy_capture_frame_v1_destroy(frame);
 	cap.frame = NULL;
+
+	switch(reason) {
+	case EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS:
+		fprintf(stderr, "capture: the source was resized; waiting for new buffers\n");
+		cap.realloc_pending = 1;
+		cap.constraints_wait_ms = now_ms();
+		break;
+	case EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED:
+		cap.stopped = 1;
+		break;
+	default:
+		/* "unknown" is retriable; retry, but do not spin forever on a
+		 * source that never completes a frame. */
+		if(++cap.failures >= 60) {
+			fprintf(stderr, "capture: frame failed (reason %u)\n", reason);
+			cap.failed = 1;
+		}
+		break;
+	}
 }
 
 static void frame_transform(void *data, struct ext_image_copy_capture_frame_v1 *frame,
@@ -495,8 +551,10 @@ static void session_done(void *data, struct ext_image_copy_capture_session_v1 *s
 	}
 
 	/* A second done (resize, mode change) keeps the buffer when nothing
-	 * about the geometry changed. */
-	if(cap.buffer && cap.width == cap.buffer_w && cap.height == cap.buffer_h)
+	 * about the geometry changed.  A frame that failed on stale buffer
+	 * constraints still needs a fresh buffer, even at the same size. */
+	if(cap.buffer && !cap.realloc_pending &&
+	   cap.width == cap.buffer_w && cap.height == cap.buffer_h)
 		return;
 
 	release_buffer();
@@ -534,6 +592,9 @@ static void session_done(void *data, struct ext_image_copy_capture_session_v1 *s
 	cap.crop_y = (int) cy;
 	cap.crop_w = cw;
 	cap.crop_h = ch;
+	cap.realloc_pending = 0;
+	cap.constraints_wait_ms = 0;
+	cap.need_full_present = 1;
 
 	if(cap.xdata)
 		xhandler_resize(cap.xdata, cw, ch, cap.swap_rb);
@@ -915,6 +976,10 @@ static void destroy_capture(void) {
 	cap.swap_rb = 0;
 	cap.stalled = 0;
 	cap.frame_request_ms = 0;
+	cap.realloc_pending = 0;
+	cap.constraints_wait_ms = 0;
+	cap.need_full_present = 0;
+	cap.failures = 0;
 	if(cap.display)
 		wl_display_flush(cap.display);
 }
@@ -1028,6 +1093,17 @@ void wlcap_stop(void) {
 	cap.current_label[0] = '\0';
 }
 
+void wlcap_set_fps(int fps) {
+	if(fps < 1)
+		fps = 1;
+	if(fps > 240)
+		fps = 240;
+
+	cap.frame_interval_ms = (uint32_t) (1000 / fps);
+	if(cap.frame_interval_ms == 0)
+		cap.frame_interval_ms = 1;
+}
+
 int wlcap_active(void) {
 	return cap.session_ready && !cap.failed && !cap.stopped;
 }
@@ -1043,6 +1119,26 @@ int wlcap_stalled(void) {
 void wlcap_tick(void) {
 	if(!cap.display || !cap.session_ready || !cap.buffer)
 		return;
+
+	if(cap.realloc_pending) {
+		/*
+		 * The compositor normally answers a buffer_constraints failure with
+		 * buffer_size + done, and session_done() allocates the new buffer.
+		 * If that never arrives, reallocate from the geometry known so far
+		 * instead of staying black forever.
+		 */
+		if((int32_t) (now_ms() - cap.constraints_wait_ms) < FRAME_TIMEOUT_MS)
+			return;
+
+		cap.realloc_pending = 0;
+		release_buffer();
+		if(create_shm_buffer() != 0) {
+			fprintf(stderr, "capture: cannot reallocate the shm buffer\n");
+			cap.failed = 1;
+			return;
+		}
+		cap.need_full_present = 1;
+	}
 
 	if(cap.frame_pending) {
 		if((int32_t) (now_ms() - cap.frame_request_ms) < FRAME_TIMEOUT_MS)
@@ -1064,7 +1160,7 @@ void wlcap_tick(void) {
 		cap.stalled = 1;
 	}
 
-	if(now_ms() - cap.last_frame_ms < FRAME_INTERVAL_MS)
+	if(now_ms() - cap.last_frame_ms < cap.frame_interval_ms)
 		return;
 
 	cap.frame_damage = 0;

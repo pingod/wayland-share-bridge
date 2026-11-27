@@ -50,6 +50,12 @@ int wlcap_start(const struct source_request *req, struct xdata *xdata);
 
 void wlcap_stop(void);
 
+/*
+ * Sets the frame rate the direct backend asks the compositor for.  60 fps
+ * makes scrolling and video look smoother; lower rates save CPU and bandwidth.
+ */
+void wlcap_set_fps(int fps);
+
 int wlcap_active(void);
 
 /* Non-zero while the compositor has not completed a frame for ~2 s. */

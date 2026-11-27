@@ -50,6 +50,8 @@ static int g_direct_stalled = 0;
 static char g_last_spec[256] = "";
 static int g_visible = 0;
 static int g_sharing = 0;
+static enum capture_quality g_quality = QUALITY_SOURCE;
+static int g_fps = FPS_DEFAULT;
 static enum source_kind g_share_kind = SOURCE_KIND_ANY;
 static char g_share_label[192] = "";
 static const char *g_tray_title = NULL;
@@ -228,6 +230,38 @@ static void update_tray_state(void) {
 		thandler_set_state(g_tray, g_sharing, g_visible, g_share_kind, g_share_label);
 }
 
+/*
+ * Quality and frame rate are live settings: a cap only reallocates the mirror
+ * on the next frame, so no capture session has to be restarted.  They are
+ * remembered like the source.
+ */
+static void apply_quality(enum capture_quality quality) {
+	unsigned int max_width, max_height;
+
+	g_quality = quality;
+	quality_limits(quality, &max_width, &max_height);
+	if(g_xdata)
+		xhandler_set_max_size(g_xdata, max_width, max_height);
+	if(g_remember && g_state_file[0])
+		state_write(g_state_file, "quality", quality_name(quality));
+	if(g_tray)
+		thandler_set_quality(g_tray, (int) g_quality, g_fps);
+}
+
+static void apply_fps(int fps) {
+	char text[16];
+
+	g_fps = fps;
+	if(g_direct)
+		wlcap_set_fps(fps);
+	if(g_remember && g_state_file[0]) {
+		snprintf(text, sizeof(text), "%d", fps);
+		state_write(g_state_file, "fps", text);
+	}
+	if(g_tray)
+		thandler_set_quality(g_tray, (int) g_quality, g_fps);
+}
+
 static void set_idle_status(const char *text) {
 	char label[288];
 
@@ -268,6 +302,7 @@ static void tick(void *user_data) {
 				thandler_set_source_provider(g_tray, wlcap_list);
 			thandler_set_state(g_tray, g_sharing, g_visible,
 					   g_share_kind, g_share_label);
+			thandler_set_quality(g_tray, (int) g_quality, g_fps);
 			set_idle_status(NULL);
 			fprintf(stderr, "Reconnected to the session bus\n");
 		} else {
@@ -321,6 +356,10 @@ static void usage(FILE *out) {
 		"  -k, --source-kind=KIND\n"
 		"                        fallback source kind for the portal backend\n"
 		"                        (auto, any, screen, window; default: auto)\n"
+		"  -q, --quality=PRESET  cap the mirror resolution: source (1:1, default),\n"
+		"                        1080p, 720p or 480p (aspect ratio preserved,\n"
+		"                        never upscaled; smaller costs less bandwidth)\n"
+		"  -F, --fps=RATE        direct capture frame rate, 5..60 (default: 30)\n"
 		"  -S, --source=SPEC     capture SPEC right away: screen:NAME,\n"
 		"                        window:APP_ID, window:APP_ID|TITLE, or\n"
 		"                        region:NAME,X,Y,W,H (direct capture only);\n"
@@ -509,6 +548,8 @@ int main(int argc, char *argv[]) {
 		.show = 0,
 		.tray = 1,
 		.source_kind = SOURCE_KIND_AUTO,
+		.quality = QUALITY_SOURCE,
+		.fps = FPS_DEFAULT,
 		.token_file = NULL,
 	};
 	enum {
@@ -521,6 +562,8 @@ int main(int argc, char *argv[]) {
 		OPT_PORTAL,
 		OPT_LIST_SOURCES,
 	};
+	int quality_set = 0;
+	int fps_set = 0;
 	char *owned_state_dir = NULL;
 	char *owned_token_path = NULL;
 	char *owned_state_path = NULL;
@@ -544,6 +587,8 @@ int main(int argc, char *argv[]) {
 	static const struct option long_options[] = {
 		{ "cursor", required_argument, NULL, 'c' },
 		{ "source-kind", required_argument, NULL, 'k' },
+		{ "quality", required_argument, NULL, 'q' },
+		{ "fps", required_argument, NULL, 'F' },
 		{ "source", required_argument, NULL, 'S' },
 		{ "list-sources", no_argument, NULL, 'L' },
 		{ "portal", no_argument, NULL, OPT_PORTAL },
@@ -565,7 +610,7 @@ int main(int argc, char *argv[]) {
 
 	pw_init(&argc, &argv);
 
-	while((opt = getopt_long(argc, argv, "c:k:S:Lrnst:f:hV", long_options, NULL)) != -1) {
+	while((opt = getopt_long(argc, argv, "c:k:q:F:S:Lrnst:f:hV", long_options, NULL)) != -1) {
 		switch(opt) {
 		case 'c':
 			if(parse_cursor_mode(optarg, &options.cursor) != 0) {
@@ -578,6 +623,21 @@ int main(int argc, char *argv[]) {
 				fprintf(stderr, "Unknown source kind '%s' (expected auto, any, screen or window)\n", optarg);
 				goto out;
 			}
+			break;
+		case 'q':
+			if(parse_quality(optarg, &options.quality) != 0) {
+				fprintf(stderr, "Unknown quality '%s' (expected source, 1080p, 720p or 480p)\n", optarg);
+				goto out;
+			}
+			quality_set = 1;
+			break;
+		case 'F':
+			if(parse_fps(optarg, &options.fps) != 0) {
+				fprintf(stderr, "Invalid frame rate '%s' (expected %d..%d)\n",
+					optarg, FPS_MIN, FPS_MAX);
+				goto out;
+			}
+			fps_set = 1;
 			break;
 		case 'S':
 			initial_source = optarg;
@@ -731,12 +791,35 @@ int main(int argc, char *argv[]) {
 	g_remember = options.remember;
 	g_visible = options.show ? 1 : 0;
 
+	/* Command line wins over the remembered quality and frame rate. */
+	g_quality = options.quality;
+	g_fps = options.fps;
+	if(g_remember && g_state_file[0]) {
+		char *saved;
+
+		if(!quality_set && (saved = state_read(g_state_file, "quality")) != NULL) {
+			(void) parse_quality(saved, &g_quality);
+			free(saved);
+		}
+		if(!fps_set && (saved = state_read(g_state_file, "fps")) != NULL) {
+			(void) parse_fps(saved, &g_fps);
+			free(saved);
+		}
+	}
+	wlcap_set_fps(g_fps);
+
 	g_tray_title = options.title;
 	g_want_tray = options.tray;
 
 	g_xdata = xhandler_init(&options);
 	if(!g_xdata)
 		goto out;
+	{
+		unsigned int max_width = 0, max_height = 0;
+
+		quality_limits(g_quality, &max_width, &max_height);
+		xhandler_set_max_size(g_xdata, max_width, max_height);
+	}
 
 	/* Hide the mirror window on compositors where the X11 property is ignored. */
 	hyprland_set_visibility(g_visible);
@@ -748,6 +831,7 @@ int main(int argc, char *argv[]) {
 		if(g_direct)
 			thandler_set_source_provider(g_tray, wlcap_list);
 		update_tray_state();
+		thandler_set_quality(g_tray, (int) g_quality, g_fps);
 	}
 
 	{
@@ -889,6 +973,16 @@ int main(int argc, char *argv[]) {
 				stop_sharing(&ddata, &pdata, &active, &direct_active);
 			if(toggle && g_sharing)
 				set_window_visibility(!g_visible);
+		}
+
+		if(g_tray) {
+			int quality;
+			int fps;
+
+			if(thandler_take_quality(g_tray, &quality))
+				apply_quality((enum capture_quality) quality);
+			if(thandler_take_fps(g_tray, &fps))
+				apply_fps(fps);
 		}
 
 		if(g_direct && wlcap_dispatch() != 0) {

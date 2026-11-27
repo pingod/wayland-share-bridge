@@ -318,27 +318,46 @@ struct xdata *xhandler_init(const struct options *opts) {
 	return data;
 }
 
-void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height, int swap_rb) {
+/*
+ * Fits width x height inside the current quality cap, keeping the aspect
+ * ratio.  Never upscales: a cap larger than the source keeps it 1:1.
+ */
+static void capped_size(const struct xdata *data, unsigned int width, unsigned int height,
+			unsigned int *out_width, unsigned int *out_height) {
+	*out_width = width;
+	*out_height = height;
+
+	if(data->max_width == 0 || data->max_height == 0)
+		return;
+	if(width <= data->max_width && height <= data->max_height)
+		return;
+
+	if((uint64_t) width * data->max_height <= (uint64_t) height * data->max_width) {
+		/* The height is the limiting dimension. */
+		*out_height = data->max_height;
+		*out_width = (unsigned int) (((uint64_t) width * data->max_height +
+					      height / 2) / height);
+	} else {
+		*out_width = data->max_width;
+		*out_height = (unsigned int) (((uint64_t) height * data->max_width +
+					       width / 2) / width);
+	}
+	if(*out_width == 0)
+		*out_width = 1;
+	if(*out_height == 0)
+		*out_height = 1;
+}
+
+static void apply_output_size(struct xdata *data, unsigned int width, unsigned int height) {
 	XWindowChanges changes;
 
-	if(!data || !data->display)
+	if(data->image && width == data->width && height == data->height)
 		return;
-
-	if(width == 0 || height == 0 || width > 16384 || height > 16384) {
-		fprintf(stderr, "Refusing a %ux%u frame (limits are 1..16384)\n", width, height);
-		return;
-	}
-
-	if(data->image && width == data->width && height == data->height) {
-		data->swap_rb = swap_rb;
-		return;
-	}
 
 	image_free(data);
 
 	data->width = width;
 	data->height = height;
-	data->swap_rb = swap_rb;
 
 	if(image_alloc(data, width, height) != 0) {
 		fprintf(stderr, "Out of memory for a %ux%u frame\n", width, height);
@@ -351,14 +370,86 @@ void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height
 	/* Keep the (interactive) input region in sync with the new size. */
 	if(data->visible)
 		set_input_region(data->display, data->window, 1, data->width, data->height);
+	data->repaint = 1;
 	XFlush(data->display);
+}
+
+static void set_source_size(struct xdata *data, unsigned int width, unsigned int height,
+			    int swap_rb) {
+	unsigned int out_width, out_height;
+
+	data->src_width = width;
+	data->src_height = height;
+	data->swap_rb = swap_rb;
+
+	capped_size(data, width, height, &out_width, &out_height);
+	data->scaled = out_width != width || out_height != height;
+	apply_output_size(data, out_width, out_height);
+}
+
+void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height, int swap_rb) {
+	if(!data || !data->display)
+		return;
+
+	if(width == 0 || height == 0 || width > 16384 || height > 16384) {
+		fprintf(stderr, "Refusing a %ux%u frame (limits are 1..16384)\n", width, height);
+		return;
+	}
+
+	set_source_size(data, width, height, swap_rb);
+}
+
+void xhandler_set_max_size(struct xdata *data, unsigned int max_width, unsigned int max_height) {
+	if(!data)
+		return;
+	if(data->max_width == max_width && data->max_height == max_height)
+		return;
+
+	data->max_width = max_width;
+	data->max_height = max_height;
+	/* The capture thread applies the cap on its next upload - it may own the
+	 * image while a portal stream runs - and this makes sure that upload
+	 * happens even when the next frame carries no damage. */
+	data->repaint = 1;
+}
+
+int xhandler_scaled(const struct xdata *data) {
+	return data ? data->scaled : 0;
+}
+
+int xhandler_repaint_pending(const struct xdata *data) {
+	return data ? data->repaint : 0;
 }
 
 int xhandler_upload(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,
 		    int src_x, int src_y, unsigned int width, unsigned int height,
 		    int transform) {
-	if(!data || !data->image || !data->buffer || stride <= 0 || !pixels)
+	int rotated;
+	unsigned int out_w, out_h;
+
+	if(!data || !data->display || stride <= 0 || !pixels)
 		return -1;
+	if(width == 0 || height == 0)
+		return -1;
+
+	rotated = (transform == 1 || transform == 3 ||
+		   transform == 5 || transform == 7);
+	out_w = rotated ? height : width;
+	out_h = rotated ? width : height;
+
+	/* Applies a quality change and keeps the window in sync with the frame. */
+	set_source_size(data, out_w, out_h, data->swap_rb);
+
+	if(!data->image || !data->buffer)
+		return -1;
+
+	if(data->scaled)
+		return image_convert_scaled((unsigned char *) data->buffer,
+					    data->width, data->height,
+					    (size_t) data->width * 4,
+					    pixels, size, stride,
+					    src_x, src_y, width, height,
+					    data->swap_rb, transform);
 
 	return image_convert((unsigned char *) data->buffer, data->width, data->height,
 			     (size_t) data->width * 4,
@@ -372,6 +463,15 @@ void xhandler_present(struct xdata *data, int x, int y, unsigned int width, unsi
 
 	if(!data || !data->image || !data->display)
 		return;
+
+	/* A new image or window size needs one full repaint; a damage rectangle
+	 * computed for the previous size must not be used. */
+	if(data->repaint) {
+		x = 0;
+		y = 0;
+		width = data->width;
+		height = data->height;
+	}
 
 	max_w = (int) data->width;
 	max_h = (int) data->height;
@@ -416,6 +516,7 @@ void xhandler_present(struct xdata *data, int x, int y, unsigned int width, unsi
 			  data->image, x, y, x, y, width, height);
 		XFlush(data->display);
 	}
+	data->repaint = 0;
 }
 
 void xhandler_draw(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,

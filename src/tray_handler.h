@@ -44,6 +44,17 @@ int thandler_take_stop(struct tray *tray);
 /* Returns 1 when the user asked to toggle the mirror window visibility. */
 int thandler_take_visibility(struct tray *tray);
 
+/*
+ * Updates the quality preset and frame rate reflected by the menu's check
+ * marks.  SET_QUALITY only changes the display; the takes report a pick from
+ * the menu, which the event loop applies and persists.
+ */
+void thandler_set_quality(struct tray *tray, int quality, int fps);
+
+/* Returns 1 when the user picked a new quality preset / frame rate. */
+int thandler_take_quality(struct tray *tray, int *quality);
+int thandler_take_fps(struct tray *tray, int *fps);
+
 struct capture_source;
 
 /*

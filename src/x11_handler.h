@@ -12,8 +12,19 @@
 struct xdata {
 	int fd;
 
+	/* Mirror size: width/height are the output (possibly scaled) size,
+	 * src_width/src_height the size the capture backend last reported. */
 	unsigned int width;
 	unsigned int height;
+	unsigned int src_width;
+	unsigned int src_height;
+	/* Quality cap; 0 means the mirror follows the source 1:1. */
+	unsigned int max_width;
+	unsigned int max_height;
+	int scaled;
+	/* The image was (re)allocated or the window resized: the next frame has
+	 * to be uploaded and presented in full. */
+	int repaint;
 	int swap_rb;
 
 	/* MIT-SHM is used when the server supports it (no socket copy). */
@@ -33,12 +44,30 @@ struct xdata {
 
 struct xdata *xhandler_init(const struct options *opts);
 
-/* (Re)allocates the mirror image and resizes the window. */
+/*
+ * Reports the size of a captured frame (already rotated/cropped): applies
+ * the quality cap, (re)allocates the mirror image and resizes the window.
+ * Cheap to call for every frame; it only acts when the size changed.
+ */
 void xhandler_resize(struct xdata *data, unsigned int width, unsigned int height, int swap_rb);
 
 /*
+ * Sets the largest mirror size a quality preset allows (0/0 = no cap).  The
+ * cap is applied on the capture thread by the next resize/upload, because the
+ * PipeWire thread may own the image while a portal stream runs.
+ */
+void xhandler_set_max_size(struct xdata *data, unsigned int max_width, unsigned int max_height);
+
+/* Non-zero while the mirror is a downscaled copy of the source. */
+int xhandler_scaled(const struct xdata *data);
+
+/* Non-zero when the next frame must be uploaded and presented in full. */
+int xhandler_repaint_pending(const struct xdata *data);
+
+/*
  * Converts a frame region into the mirror image without talking to the X
- * server (so a damage rectangle can be presented separately).
+ * server (so a damage rectangle can be presented separately).  The region
+ * must cover the whole frame (src_x/src_y are its origin).
  */
 int xhandler_upload(struct xdata *data, const void *pixels, uint32_t size, int32_t stride,
 		    int src_x, int src_y, unsigned int width, unsigned int height,

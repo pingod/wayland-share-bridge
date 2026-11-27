@@ -131,6 +131,38 @@ static void test_source_spec(void) {
 		      "kind auto");
 		CHECK(parse_source_kind("nope", &kind) != 0, "kind invalid");
 	}
+
+	{
+		enum capture_quality quality;
+		int fps;
+
+		CHECK(parse_quality("source", &quality) == 0 && quality == QUALITY_SOURCE,
+		      "quality source");
+		CHECK(parse_quality("1080p", &quality) == 0 && quality == QUALITY_1080P,
+		      "quality 1080p");
+		CHECK(parse_quality("720p", &quality) == 0 && quality == QUALITY_720P,
+		      "quality 720p");
+		CHECK(parse_quality("low", &quality) == 0 && quality == QUALITY_480P,
+		      "quality alias");
+		CHECK(parse_quality("nope", &quality) != 0, "quality invalid");
+
+		CHECK(parse_fps("60", &fps) == 0 && fps == 60, "fps 60");
+		CHECK(parse_fps("5", &fps) == 0 && fps == 5, "fps minimum");
+		CHECK(parse_fps("4", &fps) != 0, "fps below minimum");
+		CHECK(parse_fps("61", &fps) != 0, "fps above maximum");
+		CHECK(parse_fps("30x", &fps) != 0, "fps trailing garbage");
+		CHECK(parse_fps("", &fps) != 0, "fps empty");
+	}
+
+	{
+		unsigned int width = 1, height = 1;
+
+		CHECK(!strcmp(quality_name(QUALITY_720P), "720p"), "quality name");
+		quality_limits(QUALITY_1080P, &width, &height);
+		CHECK(width == 1920 && height == 1080, "1080p limits");
+		quality_limits(QUALITY_SOURCE, &width, &height);
+		CHECK(width == 0 && height == 0, "source is unlimited");
+	}
 }
 
 /* A 3x2 frame: every pixel is (r, g, b, 0xff) with a unique r. */
@@ -247,6 +279,57 @@ static void test_image_convert(void) {
 	      "zero stride rejected");
 }
 
+/*
+ * The quality presets shrink the frame; every destination pixel must be the
+ * average of the source block it covers, so text stays readable instead of
+ * aliasing away.
+ */
+static void test_image_convert_scaled(void) {
+	static const unsigned char reds[8] = { 0, 10, 20, 30, 40, 50, 60, 70 };
+	unsigned char source[4 * 2 * 4];
+	unsigned char plain[4 * 2 * 4];
+	unsigned char dst[4 * 2 * 4];
+	unsigned int i;
+
+	for(i = 0; i < 8; i++) {
+		source[i * 4 + 0] = reds[i];
+		source[i * 4 + 1] = 0x10;
+		source[i * 4 + 2] = 0x20;
+		source[i * 4 + 3] = 0x00;
+	}
+
+	/* 4x2 -> 2x1: each pixel averages its 2x2 block and is opaque. */
+	memset(dst, 0xaa, sizeof(dst));
+	CHECK(image_convert_scaled(dst, 2, 1, 8, source, sizeof(source), 16,
+				   0, 0, 4, 2, 0, 0) == 0, "scaled convert");
+	CHECK(dst[0] == 25 && dst[1] == 0x10 && dst[2] == 0x20 && dst[3] == 0xff,
+	      "first pixel average (got %u,%u,%u,%u)", dst[0], dst[1], dst[2], dst[3]);
+	CHECK(dst[4] == 45 && dst[7] == 0xff, "second pixel average");
+
+	/* At 1:1 the plain converter is used, red/blue swap included. */
+	memset(dst, 0xaa, sizeof(dst));
+	memset(plain, 0xaa, sizeof(plain));
+	CHECK(image_convert_scaled(dst, 4, 2, 16, source, sizeof(source), 16,
+				   0, 0, 4, 2, 1, 0) == 0, "1:1 scaled convert");
+	image_convert(plain, 4, 2, 16, source, sizeof(source), 16,
+		      0, 0, 4, 2, 1, 0);
+	CHECK(memcmp(dst, plain, sizeof(plain)) == 0, "1:1 matches image_convert");
+	CHECK(dst[0] == 0x20 && dst[3] == 0xff, "1:1 swap_rb");
+
+	/* Rotated: 4x2 turned 90 degrees is 2x4; shown at 2x1 it averages both
+	 * halves (columns of the rotated image are rows of the source). */
+	memset(dst, 0xaa, sizeof(dst));
+	CHECK(image_convert_scaled(dst, 2, 1, 8, source, sizeof(source), 16,
+				   0, 0, 4, 2, 0, 1) == 0, "rotated scaled convert");
+	CHECK(dst[0] == 15 && dst[4] == 55, "rotated averages (got %u, %u)",
+	      dst[0], dst[4]);
+
+	CHECK(image_convert_scaled(NULL, 2, 1, 8, source, sizeof(source), 16,
+				   0, 0, 4, 2, 0, 0) != 0, "NULL destination rejected");
+	CHECK(image_convert_scaled(dst, 2, 1, 8, source, sizeof(source), 0,
+				   0, 0, 4, 2, 0, 0) != 0, "zero stride rejected");
+}
+
 static char *make_temp_dir(void) {
 	char template[] = "/tmp/wsb-test-XXXXXX";
 	char *dir = mkdtemp(template);
@@ -333,6 +416,7 @@ int main(void) {
 	test_source_spec();
 	test_hypr_visibility_rule();
 	test_image_convert();
+	test_image_convert_scaled();
 	test_state_file();
 
 	if(failures) {

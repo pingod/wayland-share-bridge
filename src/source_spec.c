@@ -126,3 +126,79 @@ int parse_source_spec(const char *spec, struct source_request *req) {
 
 	return 0;
 }
+
+int parse_quality(const char *value, enum capture_quality *out) {
+	if(!value || !out)
+		return -1;
+
+	if(!strcmp(value, "source") || !strcmp(value, "original") || !strcmp(value, "native"))
+		*out = QUALITY_SOURCE;
+	else if(!strcmp(value, "1080p") || !strcmp(value, "high"))
+		*out = QUALITY_1080P;
+	else if(!strcmp(value, "720p") || !strcmp(value, "medium"))
+		*out = QUALITY_720P;
+	else if(!strcmp(value, "480p") || !strcmp(value, "low"))
+		*out = QUALITY_480P;
+	else
+		return -1;
+
+	return 0;
+}
+
+int parse_fps(const char *value, int *out) {
+	char *end;
+	long fps;
+
+	if(!value || !out)
+		return -1;
+
+	errno = 0;
+	fps = strtol(value, &end, 10);
+	if(end == value || *end != '\0' || errno == ERANGE)
+		return -1;
+	if(fps < FPS_MIN || fps > FPS_MAX)
+		return -1;
+
+	*out = (int) fps;
+	return 0;
+}
+
+const char *quality_name(enum capture_quality quality) {
+	switch(quality) {
+	case QUALITY_1080P:
+		return "1080p";
+	case QUALITY_720P:
+		return "720p";
+	case QUALITY_480P:
+		return "480p";
+	default:
+		return "source";
+	}
+}
+
+void quality_limits(enum capture_quality quality,
+		    unsigned int *max_width, unsigned int *max_height) {
+	unsigned int width = 0, height = 0;
+
+	switch(quality) {
+	case QUALITY_1080P:
+		width = 1920;
+		height = 1080;
+		break;
+	case QUALITY_720P:
+		width = 1280;
+		height = 720;
+		break;
+	case QUALITY_480P:
+		width = 854;
+		height = 480;
+		break;
+	default:
+		break;
+	}
+
+	if(max_width)
+		*max_width = width;
+	if(max_height)
+		*max_height = height;
+}

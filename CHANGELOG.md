@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here.
 
+## 1.5.0 - 2026-11-27
+
+- **Quality and frame-rate settings.**  The tray menu gained
+  **Quality ▸** (`Source (sharpest)`, `1080p`, `720p`, `480p`) and
+  **Frame rate ▸** (60, 30, 15, 5 fps), also available as
+  `--quality=PRESET` and `--fps=RATE`.  Presets cap the mirror resolution with
+  a box-filter downscale (aspect ratio preserved, never upscaled) and are
+  remembered in the state file.  `Source (sharpest)` keeps the old lossless
+  1:1 mirror; the lower presets trade sharpness for CPU, X11 traffic and
+  encoder bandwidth.
+- **Resizing the shared window stopped the stream and left the sharing app
+  with a black picture.**  When the captured window is resized while a frame
+  is in flight, the compositor fails that frame with `buffer_constraints` and
+  follows it with fresh constraints.  The bridge treated every failed frame as
+  fatal: the direct capture was stopped, the mirror window was unmapped, and
+  **Show shared window** turned itself off.  A buffer-constraints failure is
+  now handled as what it is - a resize - by waiting for the new constraints,
+  reallocating the buffer and continuing to capture.  The first frame into a
+  new buffer is also presented in full, so a resize cannot leave undamaged
+  (black) parts of the window behind.
+
 ## 1.4.3 - 2026-11-19
 
 - **Stopping sharing or quitting left an invisible window on the desktop.**

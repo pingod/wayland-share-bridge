@@ -25,4 +25,17 @@ int image_convert(unsigned char *dst, unsigned int dst_w, unsigned int dst_h,
 		  int src_x, int src_y, unsigned int width, unsigned int height,
 		  int swap_rb, int transform);
 
+/*
+ * Same as image_convert(), but the (rotated) source rectangle is scaled to
+ * fill dst exactly.  Every destination pixel is the average of the source
+ * pixels it covers, so downscaling keeps text readable instead of picking
+ * single pixels.  Used for the quality presets, which cap the mirror
+ * resolution.  The destination is always fully written; alpha is opaque.
+ */
+int image_convert_scaled(unsigned char *dst, unsigned int dst_w, unsigned int dst_h,
+			 size_t dst_stride,
+			 const unsigned char *src, size_t src_size, int src_stride,
+			 int src_x, int src_y, unsigned int width, unsigned int height,
+			 int swap_rb, int transform);
+
 #endif /* IMAGE_CONVERT_H */

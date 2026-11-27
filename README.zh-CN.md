@@ -133,6 +133,9 @@ sudo ninja -C build install
   -k, --source-kind=KIND
                         门户后端的源类型：auto、any、screen、window
                         （默认 auto）
+  -q, --quality=PRESET  限制镜像分辨率：source（原始，默认）、1080p、
+                        720p、480p（保持宽高比、不放大；越低越省带宽）
+  -F, --fps=RATE        直连抓屏帧率，5..60（默认 30）
   -S, --source=SPEC     立刻共享指定源：screen:NAME、window:APP_ID、
                         window:APP_ID|TITLE 或 region:NAME,X,Y,W,H
   -L, --list-sources    列出可共享的屏幕和窗口
@@ -161,6 +164,7 @@ wayland-share-bridge --source='window:firefox|DeepSeek' --no-tray
 wayland-share-bridge --source=region:DP-2,100,200,1280,720
 wayland-share-bridge --search firefox
 wayland-share-bridge --portal --cursor=hidden
+wayland-share-bridge --quality=720p --fps=60   # 更省资源、更流畅
 ```
 
 ## 托盘菜单
@@ -171,6 +175,8 @@ wayland-share-bridge --portal --cursor=hidden
 | **显示/隐藏共享窗口** | 切换镜像窗口的可见性；隐藏时不可见且点击穿透，显示时接受鼠标以便合成器拖动。停止共享时窗口会从桌面移除。 |
 | **屏幕 ▸** | 每个显示器一项，`DP-2 (2560x1440)`；当前源带勾选。 |
 | **窗口 ▸** | 按应用分组：`firefox (3) ▸ 窗口标题`；当前源带勾选。 |
+| **画质 ▸** | 镜像分辨率上限：**原始（最清晰）** 按 1:1 显示，`1080p`/`720p`/`480p` 按面积平均缩小（保持宽高比）。越低越省 CPU，接收端要编码的数据也更少。 |
+| **帧率 ▸** | 直连抓屏帧率：60/30/15/5 fps。60 让滚动和视频更流畅，默认 30。 |
 | **使用系统门户共享…** | 系统选择器（等价 `--reselect`）。 |
 | **退出** | 停止桥接。 |
 
@@ -181,6 +187,17 @@ wayland-share-bridge --portal --cursor=hidden
 合成器往返），新开的窗口下次打开即可看到。
 
 界面文案跟随 `LC_ALL`/`LC_MESSAGES`/`LANG`：中文环境显示中文菜单。
+
+### 清晰度与带宽
+
+选 **原始（最清晰）** 时，镜像与共享内容逐像素一致：桥接只是无损搬运画面，
+本身不会让画面变糊。会议里仍觉得模糊，多半是会议软件自己的编码和画质设置造成
+的，先查那边的设置。
+
+其余预设是反方向的：**画质 ▸** 限制镜像分辨率（`1080p` = 1920x1080、
+`720p` = 1280x720、`480p` = 854x480，按面积平均缩小，文字仍然可读），
+**帧率 ▸** 限制抓屏次数。数值越低，CPU 占用、X11 传输和接收端要编码的数据就越少，
+适合性能较弱或网络较差的情况。
 
 ## 日志
 

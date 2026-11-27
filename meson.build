@@ -1,6 +1,6 @@
 project('wayland-share-bridge',
         'c',
-        version : '1.4.3',
+        version : '1.5.0',
         license : 'EUPL-1.2',
         meson_version : '>= 0.60',
         default_options : ['warning_level=3', 'c_std=gnu11'])
